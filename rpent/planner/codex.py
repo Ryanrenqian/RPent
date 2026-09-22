@@ -748,6 +748,12 @@ def _codex_mcp_config_overrides(
 ) -> list[str]:
     config: list[tuple[str, Any]] = [
         ("mcp_servers.rpent.url", mcp_url),
+        # The OpenAI-compatible gateway rejects very large JSON request
+        # bodies before the model's context limit is reached. Declare the
+        # official GPT-5.6 context and compact early enough to keep long
+        # multimodal LIBERO turns transportable without reducing max_turns.
+        ("model_context_window", 1050000),
+        ("model_auto_compact_token_limit", 60000),
     ]
     if base_url:
         normalized = base_url.rstrip("/")
