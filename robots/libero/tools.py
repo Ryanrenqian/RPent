@@ -372,15 +372,18 @@ class LiberoPrimitives:
             if self.env.terminated or self.env.truncated:
                 break
         final = self._last_obs_eef_pos
+        final_dist_m = float(np.linalg.norm(target - final))
         return {
             "name": "move_to",
             "target_xyz": [float(x) for x in target],
             "final_eef_pos": [round(float(x), 4) for x in final],
-            "final_dist_m": round(float(np.linalg.norm(target - final)), 4),
+            "final_dist_m": round(final_dist_m, 4),
             "steps_used": len(traj),
             "max_steps": max_steps,
             "terminated": self.env.terminated,
             "truncated": self.env.truncated,
+            "success": final_dist_m < tol,
+            "diagnostics": {"tol": tol},
         }
 
     def rotate_wrist(
@@ -618,14 +621,32 @@ class LiberoPrimitives:
                 break
         final = self._last_obs_eef_pos
         fq = self.env.raw_obs()["robot0_eef_quat"]
+        final_dist_m = float(np.linalg.norm(target - final))
+        final_pitch_error = (
+            0.0
+            if target_pitch is None
+            else float((target_pitch - _pitch_of(fq) + np.pi) % (2 * np.pi) - np.pi)
+        )
+        final_yaw_error = (
+            0.0
+            if target_yaw is None
+            else float((target_yaw - _yaw_of(fq) + np.pi) % (2 * np.pi) - np.pi)
+        )
         return {
             "name": "move_pose",
+            "target_xyz": [float(x) for x in target],
             "final_eef_pos": [round(float(x), 4) for x in final],
-            "final_dist_m": round(float(np.linalg.norm(target - final)), 4),
+            "final_dist_m": round(final_dist_m, 4),
             "final_pitch": round(_pitch_of(fq), 4),
             "steps_used": step + 1,
             "terminated": self.env.terminated,
             "truncated": self.env.truncated,
+            "success": (
+                final_dist_m < tol
+                and abs(final_pitch_error) < ori_tol
+                and abs(final_yaw_error) < ori_tol
+            ),
+            "diagnostics": {"tol": tol, "ori_tol": ori_tol},
         }
 
     def release(
