@@ -1,0 +1,21 @@
+# Snapshot of the classification assignments in
+# agenticEM/deploy/rpent_gpt55/summarize.py on 2026-09-22. RPent does not ship
+# that deployment script, so the migrated AST comparison reads this text file.
+
+INFRA_PATTERNS = (
+    ("413", re.compile(r"413 Payload Too Large")),
+    ("upstream_disconnect", re.compile(r"stream disconnected before completion")),
+    (
+        "relay_capacity",
+        re.compile(
+            r"Concurrency limit exceeded|currently overloaded|service is busy|Too many pending requests"
+        ),
+    ),
+)
+
+TIMEOUT_RE = re.compile(r"Codex SDK timed out after (\d+)s|interrupted duration=\d+")
+NORMAL_END_RE = re.compile(r"\[agent\] transcript:")
+ROBOT_TOOL_RE = re.compile(
+    r"\[tool<-\] (view_env_state|move_to|pi0_pick|pi0_doubled|back_project|segment"
+    r"|set_gripper|release|rotate_wrist|rotate_pitch|move_pose|finish)\b"
+)
