@@ -753,7 +753,10 @@ def _codex_mcp_config_overrides(
         # official GPT-5.6 context and compact early enough to keep long
         # multimodal LIBERO turns transportable without reducing max_turns.
         ("model_context_window", 1050000),
-        ("model_auto_compact_token_limit", 60000),
+        (
+            "model_auto_compact_token_limit",
+            int(os.environ.get("RPENT_CODEX_COMPACT_TOKEN_LIMIT", "60000")),
+        ),
     ]
     if base_url:
         normalized = base_url.rstrip("/")
