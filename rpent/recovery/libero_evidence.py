@@ -67,7 +67,7 @@ def map_libero_evidence(result: Mapping[str, Any]) -> dict[str, Any]:
         }
 
     gripper_qpos = state_mapping.get("robot0_gripper_qpos")
-    if isinstance(gripper_qpos, (list, tuple)):
-        mapped["gripper_opening"] = sum(abs(value) for value in gripper_qpos)
+    if isinstance(gripper_qpos, (list, tuple)) and len(gripper_qpos) >= 2:
+        mapped["gripper_opening"] = sum(abs(value) for value in gripper_qpos[:2])
 
     return mapped

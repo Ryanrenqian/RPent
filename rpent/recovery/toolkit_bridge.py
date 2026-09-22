@@ -115,7 +115,8 @@ class ToolkitBackedRegistry:
         log = raw_result.get("log")
         if isinstance(log, Mapping) and isinstance(log.get("result"), Mapping):
             action_result = log["result"]
-        has_error = "error" in raw_result or "error" in action_result
+        error_value = raw_result.get("error") or action_result.get("error")
+        has_error = bool(error_value)
         reported_failure = (
             raw_result.get("success") is False or action_result.get("success") is False
         )
@@ -123,7 +124,6 @@ class ToolkitBackedRegistry:
         error = None
         if not success:
             if has_error:
-                error_value = raw_result.get("error", action_result.get("error"))
                 error = str(error_value)
             else:
                 error = "tool result reported success=False"

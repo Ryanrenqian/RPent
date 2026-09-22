@@ -49,6 +49,21 @@ def test_libero_evidence_maps_pose_and_gripper_values() -> None:
     }
 
 
+def test_libero_evidence_uses_only_two_finger_joints() -> None:
+    result = map_libero_evidence(
+        {
+            "state": {
+                "robot0_gripper_qpos": [0.04, -0.038, 0.5, -0.5],
+            }
+        }
+    )
+
+    assert result["gripper_opening"] == 0.078
+    assert "gripper_opening" not in map_libero_evidence(
+        {"state": {"robot0_gripper_qpos": [0.04]}}
+    )
+
+
 class _RecordingRouter:
     def __init__(self) -> None:
         self.levels: list[RecoveryLevel] = []

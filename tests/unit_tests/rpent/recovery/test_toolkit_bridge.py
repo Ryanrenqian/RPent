@@ -95,6 +95,15 @@ class _ChangingFailureToolkit(Toolkit):
             },
             self._reported_success,
         )
+        self.add_tool(
+            "falsy_error",
+            {
+                "name": "falsy_error",
+                "description": "Return a falsy error value",
+                "input_schema": {"type": "object"},
+            },
+            self._falsy_error,
+        )
 
     def _fail(self, pose: list[int]) -> dict[str, Any]:
         raise RuntimeError("fixed failure")
@@ -108,6 +117,11 @@ class _ChangingFailureToolkit(Toolkit):
     @readonly
     def _finish_with_image() -> dict[str, Any]:
         return {"_finish": True, "_image_wrist_bytes": b"wrist", "done": True}
+
+    @staticmethod
+    @readonly
+    def _falsy_error(error: Any) -> dict[str, Any]:
+        return {"error": error, "done": True}
 
     @staticmethod
     @readonly
@@ -217,6 +231,15 @@ def test_bridge_honors_explicit_success_without_reclassifying_other_results(
 
     ordinary = registry.invoke(ToolCall("finish_with_image"))
     assert ordinary.success is True
+
+
+def test_bridge_treats_falsy_error_values_as_success(tmp_path: Path) -> None:
+    registry = ToolkitBackedRegistry(_ChangingFailureToolkit(tmp_path))
+
+    for error in (None, ""):
+        result = registry.invoke(ToolCall("falsy_error", {"error": error}))
+        assert result.success is True
+        assert result.error is None
 
 
 def test_changing_failure_state_produces_two_distinct_l1_adaptations(
