@@ -30,6 +30,7 @@ from .events import (
     RecoveryDecision,
     RecoveryLevel,
 )
+from .libero_evidence import map_libero_evidence
 from .router import FailureRouter
 from .skills import SkillPlaybook
 from .tools import ToolCall, ToolRegistry, ToolResult
@@ -244,6 +245,7 @@ class SkillRuntime:
                 )
                 if not result.success:
                     output = result.output if isinstance(result.output, Mapping) else {}
+                    mapped_evidence = map_libero_evidence(output)
                     metadata = result.metadata
                     signals = DiagnosisSignals(
                         scoreable=True,
@@ -252,16 +254,19 @@ class SkillRuntime:
                         tool_error=result.error,
                         end_effector_pose=metadata.get(
                             "end_effector_pose",
-                            output.get(
+                            mapped_evidence.get(
                                 "end_effector_pose",
                                 output.get(
-                                    "pose", current_state.get("end_effector_pose")
+                                    "end_effector_pose",
+                                    output.get(
+                                        "pose", current_state.get("end_effector_pose")
+                                    ),
                                 ),
                             ),
                         ),
                         gripper_opening=metadata.get(
                             "gripper_opening",
-                            output.get(
+                            mapped_evidence.get(
                                 "gripper_opening", current_state.get("gripper_opening")
                             ),
                         ),

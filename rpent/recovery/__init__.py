@@ -44,6 +44,7 @@ from .events import (
     ToolGapEvent,
 )
 from .handoff import HANDOFF_SCHEMA, RPentHandoff
+from .libero_evidence import map_libero_evidence
 from .persistence import JsonlWriter, read_jsonl
 from .router import FailureRouter
 from .runtime import RuntimeResult, SkillRuntime
@@ -115,6 +116,7 @@ __all__ = [
     "TransportToolSynthesizer",
     "ToolGapAdapter",
     "ToolkitBackedRegistry",
+    "map_libero_evidence",
     "CellRecord",
     "CellSignals",
     "CellVerdict",
