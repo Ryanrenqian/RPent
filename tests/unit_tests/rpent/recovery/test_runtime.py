@@ -20,6 +20,7 @@ from operator import eq
 from rpent.recovery import (
     BudgetLedger,
     BudgetLimits,
+    CandidateTool,
     DiagnosisResult,
     RecoveryAction,
     RecoveryLevel,
@@ -27,10 +28,12 @@ from rpent.recovery import (
     SkillRuntime,
     SkillStep,
     SkillValidation,
+    ToolGapAdapter,
     ToolGapEvent,
     ToolRegistry,
     ToolResult,
     ToolSpec,
+    ToolVerifier,
 )
 from rpent.recovery.budget import PLANNER_TIMEOUT_S
 
@@ -47,6 +50,29 @@ def validated(skill_id: str = "recover-grasp") -> SkillPlaybook:
         provenance={"episode_id": "ep-1"},
         validation=SkillValidation("e-1", True, True, True, True),
     )
+
+
+class _RecordingSynthesizer:
+    def __init__(self, output: object = None) -> None:
+        self.output = {"restaged": True} if output is None else output
+        self.synthesis_calls = 0
+        self.executor_calls: list[tuple[dict, dict]] = []
+
+    def synthesize(self, handoff):
+        self.synthesis_calls += 1
+
+        def executor(arguments, context):
+            self.executor_calls.append((dict(arguments), dict(context)))
+            return self.output
+
+        return CandidateTool(
+            ToolSpec(
+                "capx.restage-tool",
+                "Generated restage",
+                "Generated restaging tool",
+            ),
+            executor,
+        )
 
 
 class TestEvolutionCore:
@@ -87,6 +113,89 @@ class TestEvolutionCore:
         assert result.decision.action == RecoveryAction.SYNTHESIZE_TOOL
         assert isinstance(result.events[-1], ToolGapEvent)
         assert result.events[-1].missing_capability == "restage-tool"
+
+    def test_l3_without_sandbox_refuses_candidate_execution(self):
+        registry = ToolRegistry()
+        synthesizer = _RecordingSynthesizer()
+        result = SkillRuntime(
+            registry,
+            recovery_loop=True,
+            tool_gap_adapter=ToolGapAdapter(registry),
+            synthesizer=synthesizer,
+        ).execute(validated(), episode_id="ep-l3-no-sandbox")
+
+        assert result.success is False
+        assert synthesizer.executor_calls == []
+        assert result.decision.action is RecoveryAction.GIVE_UP
+        assert (
+            result.decision.termination_reason
+            == "L3 synthesis requires an explicit verification sandbox"
+        )
+        assert (
+            result.decision.evidence["synthesis_status"]
+            == "verification_refused_sandbox_missing"
+        )
+        assert result.ledger.attempts == 2
+
+    def test_l3_synthesizes_registers_and_retries_with_failure_case(self):
+        registry = ToolRegistry()
+        synthesizer = _RecordingSynthesizer()
+        skill = validated()
+        skill = SkillPlaybook(
+            skill.skill_id,
+            skill.name,
+            skill.goal,
+            skill.trigger_labels,
+            skill.diagnosis,
+            (
+                SkillStep(
+                    "restage",
+                    "move object to reachable pose",
+                    "restage-tool",
+                    {"object": "mug"},
+                ),
+            ),
+            skill.verification_checks,
+        )
+        state = {"scene": "failed-state"}
+
+        result = SkillRuntime(
+            registry,
+            recovery_loop=True,
+            tool_gap_adapter=ToolGapAdapter(registry),
+            synthesizer=synthesizer,
+            verification_sandbox=ToolVerifier(),
+        ).execute(skill, episode_id="ep-l3-sandbox", state=state)
+
+        assert result.success is True
+        assert registry.has("capx.restage-tool")
+        assert synthesizer.synthesis_calls == 1
+        assert synthesizer.executor_calls == [
+            ({"object": "mug"}, state),
+            ({"object": "mug"}, state),
+        ]
+        assert result.tool_results[0].tool_id == "capx.restage-tool"
+        assert result.ledger.attempts == 3
+
+    def test_l3_verification_failure_gives_up_with_synthesis_evidence(self):
+        registry = ToolRegistry()
+        synthesizer = _RecordingSynthesizer(output="not a mapping")
+
+        result = SkillRuntime(
+            registry,
+            recovery_loop=True,
+            tool_gap_adapter=ToolGapAdapter(registry),
+            synthesizer=synthesizer,
+            verification_sandbox=ToolVerifier(),
+        ).execute(validated(), episode_id="ep-l3-rejected")
+
+        assert result.success is False
+        assert registry.has("capx.restage-tool") is False
+        assert result.decision.action is RecoveryAction.GIVE_UP
+        assert result.decision.evidence["synthesis_status"] == "rejected"
+        assert result.decision.evidence["verification_passed"] is False
+        assert result.decision.evidence["registered"] is False
+        assert synthesizer.executor_calls == [({}, {})]
 
 
 class TestBudgetAndRuntime:

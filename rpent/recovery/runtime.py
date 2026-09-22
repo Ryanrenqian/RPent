@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from time import monotonic
-from typing import Any, Mapping
+from typing import TYPE_CHECKING, Any, Mapping
 
 from .adapt import ParameterAdapter
 from .budget import BudgetLedger
@@ -34,6 +34,11 @@ from .libero_evidence import map_libero_evidence
 from .router import FailureRouter
 from .skills import SkillPlaybook
 from .tools import ToolCall, ToolRegistry, ToolResult
+
+if TYPE_CHECKING:
+    from .synthesis import ToolSynthesizer
+    from .tool_gap import ToolGapAdapter
+    from .verification import ToolVerifier
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,6 +71,9 @@ class SkillRuntime:
         ledger: BudgetLedger | None = None,
         recovery_loop: bool = False,
         parameter_adapter: ParameterAdapter | None = None,
+        tool_gap_adapter: ToolGapAdapter | None = None,
+        synthesizer: ToolSynthesizer | None = None,
+        verification_sandbox: ToolVerifier | None = None,
     ) -> None:
         """Configure tool resolution and optional recovery collaborators.
 
@@ -76,6 +84,9 @@ class SkillRuntime:
             ledger: Optional reusable budget ledger.
             recovery_loop: Whether failures should loop through recovery.
             parameter_adapter: Optional L1 parameter adapter override.
+            tool_gap_adapter: Optional L3 handoff and synthesis adapter.
+            synthesizer: Optional L3 candidate synthesis backend.
+            verification_sandbox: Explicit sandbox verifier for candidate execution.
         """
         self.tools = tools
         self.router = router or FailureRouter()
@@ -83,6 +94,9 @@ class SkillRuntime:
         self.ledger = ledger
         self.recovery_loop = recovery_loop
         self.parameter_adapter = parameter_adapter or ParameterAdapter()
+        self.tool_gap_adapter = tool_gap_adapter
+        self.synthesizer = synthesizer
+        self.verification_sandbox = verification_sandbox
 
     def execute(
         self,
@@ -187,38 +201,108 @@ class SkillRuntime:
                 ledger,
             )
 
+        def synthesize_l3(
+            event: FailureEvent,
+            arguments: Mapping[str, Any],
+            prior_reason: str | None,
+        ) -> RuntimeResult | str:
+            if prior_reason is not None:
+                return give_up(event, prior_reason)
+            if self.verification_sandbox is None:
+                synthesis_reason = ledger.record_attempt(
+                    state_signature=(event.tool_id, "synthesis_without_sandbox"),
+                    turns=0,
+                    env_steps=0,
+                )
+                return give_up(
+                    event,
+                    synthesis_reason
+                    or "L3 synthesis requires an explicit verification sandbox",
+                    {"synthesis_status": "verification_refused_sandbox_missing"},
+                )
+
+            synthesis_started = monotonic()
+            try:
+                synthesis = self.tool_gap_adapter.synthesize_tool_gap(
+                    event,
+                    self.synthesizer,
+                    [(dict(arguments), dict(current_state))],
+                    verifier=self.verification_sandbox,
+                )
+            except Exception as exc:
+                synthesis_reason = ledger.record_attempt(
+                    state_signature=(event.tool_id, "synthesis_failed"),
+                    wall_clock_s=monotonic() - synthesis_started,
+                    upper_model_calls=1,
+                    env_steps=0,
+                )
+                return give_up(
+                    event,
+                    synthesis_reason or f"tool synthesis failed: {type(exc).__name__}",
+                    {
+                        "synthesis_status": "failed",
+                        "synthesis_error": str(exc),
+                    },
+                )
+
+            synthesis_reason = ledger.record_attempt(
+                state_signature=(event.tool_id, "synthesis"),
+                wall_clock_s=monotonic() - synthesis_started,
+                upper_model_calls=1,
+                env_steps=0,
+            )
+            synthesis_evidence = {
+                "synthesis_status": "registered"
+                if synthesis.registered
+                else "rejected",
+                "candidate_tool_id": synthesis.candidate.spec.tool_id,
+                "verification_passed": synthesis.verification.passed,
+                "verification_failures": list(synthesis.verification.failures),
+                "registered": synthesis.registered,
+            }
+            if synthesis_reason is not None:
+                return give_up(event, synthesis_reason, synthesis_evidence)
+            if not synthesis.registered:
+                return give_up(
+                    event,
+                    "tool synthesis verification or registration failed",
+                    synthesis_evidence,
+                )
+            return synthesis.candidate.spec.tool_id
+
         for index, step in enumerate(skill.steps):
             attempt_arguments = dict(step.argument_bindings)
             attempt_arguments.update(params)
+            active_tool_id = step.tool_id
             while True:
-                call = ToolCall(tool_id=step.tool_id, arguments=attempt_arguments)
+                call = ToolCall(tool_id=active_tool_id, arguments=attempt_arguments)
                 started = ExecutionEvent(
                     episode_id=episode_id,
                     goal=skill.goal,
                     step=index,
                     state=current_state,
                     completed_subgoals=tuple(s.step_id for s in skill.steps[:index]),
-                    tool_id=step.tool_id,
+                    tool_id=active_tool_id,
                     outcome="started",
                 )
                 events.append(started)
-                if not self.tools.has(step.tool_id):
+                if not self.tools.has(active_tool_id):
                     signals = DiagnosisSignals(
                         scoreable=True,
                         cell_input={"scoreable": True},
                         libero_predicate=None,
-                        missing_capability=step.tool_id,
+                        missing_capability=active_tool_id,
                     )
                     result = self.diagnoser.diagnose(signals)
                     gap = result.to_failure_event(
                         started,
                         outcome="tool_gap",
                         tool_gap=True,
-                        missing_capability=step.tool_id,
+                        missing_capability=active_tool_id,
                     )
                     events.append(gap)
-                    ledger.record_attempt(
-                        state_signature=(step.tool_id, "missing"), env_steps=1
+                    reason = ledger.record_attempt(
+                        state_signature=(active_tool_id, "missing"), env_steps=1
                     )
                     decision = self.router.route(
                         gap,
@@ -226,13 +310,26 @@ class SkillRuntime:
                             spec.tool_id for spec in self.tools.list_specs()
                         ),
                     )
+                    if (
+                        use_recovery_loop
+                        and decision.level is RecoveryLevel.L3
+                        and self.tool_gap_adapter is not None
+                        and self.synthesizer is not None
+                    ):
+                        synthesis_outcome = synthesize_l3(
+                            gap, attempt_arguments, reason
+                        )
+                        if isinstance(synthesis_outcome, RuntimeResult):
+                            return synthesis_outcome
+                        active_tool_id = synthesis_outcome
+                        continue
                     return RuntimeResult(
                         False,
                         skill.skill_id,
                         tuple(results),
                         tuple(events),
                         contextualize(decision, gap),
-                        f"missing tool: {step.tool_id}",
+                        f"missing tool: {active_tool_id}",
                         ledger,
                     )
                 invocation_start = monotonic()
@@ -287,7 +384,7 @@ class SkillRuntime:
                             completed_subgoals=tuple(
                                 s.step_id for s in skill.steps[:index]
                             ),
-                            tool_id=step.tool_id,
+                            tool_id=active_tool_id,
                             outcome="failed",
                         )
                     )
@@ -297,7 +394,7 @@ class SkillRuntime:
                         # it out of the progress signature so L1 cannot evade
                         # no-progress detection by changing its own message.
                         state_signature=(
-                            step.tool_id,
+                            active_tool_id,
                             repr(
                                 sorted(
                                     current_state.items(),
@@ -314,6 +411,19 @@ class SkillRuntime:
                         failure,
                         available_tool_ids=(s.tool_id for s in self.tools.list_specs()),
                     )
+                    if (
+                        use_recovery_loop
+                        and decision.level is RecoveryLevel.L3
+                        and self.tool_gap_adapter is not None
+                        and self.synthesizer is not None
+                    ):
+                        synthesis_outcome = synthesize_l3(
+                            failure, attempt_arguments, reason
+                        )
+                        if isinstance(synthesis_outcome, RuntimeResult):
+                            return synthesis_outcome
+                        active_tool_id = synthesis_outcome
+                        continue
                     if use_recovery_loop and decision.level == RecoveryLevel.L1:
                         if reason is not None:
                             return give_up(failure, reason)
@@ -386,7 +496,7 @@ class SkillRuntime:
                 current_state.update(result.output)
                 step_reason = ledger.record_attempt(
                     state_signature=(
-                        step.tool_id,
+                        active_tool_id,
                         repr(
                             sorted(
                                 current_state.items(), key=lambda item: repr(item[0])
@@ -407,7 +517,7 @@ class SkillRuntime:
                         completed_subgoals=tuple(
                             s.step_id for s in skill.steps[: index + 1]
                         ),
-                        tool_id=step.tool_id,
+                        tool_id=active_tool_id,
                         outcome="succeeded",
                     )
                 )
@@ -432,7 +542,7 @@ class SkillRuntime:
                             completed_subgoals=tuple(
                                 s.step_id for s in skill.steps[: index + 1]
                             ),
-                            tool_id=step.tool_id,
+                            tool_id=active_tool_id,
                             outcome="failed",
                         ),
                         termination_reason=step_reason,

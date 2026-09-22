@@ -28,7 +28,7 @@ from .handoff import RPentHandoff
 from .router import FailureRouter
 from .synthesis import SynthesisResult, ToolSynthesisCoordinator, ToolSynthesizer
 from .tools import ToolRegistry
-from .verification import Case, Check
+from .verification import Case, Check, ToolVerifier
 
 
 class ToolGapAdapter:
@@ -93,6 +93,7 @@ class ToolGapAdapter:
         resource_budget: Mapping[str, Any] | None = None,
         precondition: Check | None = None,
         postcondition: Check | None = None,
+        verifier: ToolVerifier | None = None,
     ) -> SynthesisResult:
         """Synthesize, verify, and conditionally register an L3 tool.
 
@@ -104,6 +105,7 @@ class ToolGapAdapter:
             resource_budget: Optional synthesis resource limits.
             precondition: Optional verification precondition.
             postcondition: Optional verification postcondition.
+            verifier: Explicit verifier responsible for safe candidate execution.
 
         Returns:
             Candidate, verification report, and registration status.
@@ -113,7 +115,9 @@ class ToolGapAdapter:
             constraints=constraints,
             resource_budget=resource_budget,
         )
-        return ToolSynthesisCoordinator(self.registry).synthesize_and_register(
+        return ToolSynthesisCoordinator(
+            self.registry, verifier=verifier
+        ).synthesize_and_register(
             handoff,
             synthesizer,
             cases,
