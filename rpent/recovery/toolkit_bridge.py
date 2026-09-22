@@ -111,12 +111,27 @@ class ToolkitBackedRegistry:
         if image_keys:
             output["_images"] = image_keys
 
-        success = not bool(raw_result.get("error"))
+        action_result = raw_result
+        log = raw_result.get("log")
+        if isinstance(log, Mapping) and isinstance(log.get("result"), Mapping):
+            action_result = log["result"]
+        has_error = "error" in raw_result or "error" in action_result
+        reported_failure = (
+            raw_result.get("success") is False or action_result.get("success") is False
+        )
+        success = not (has_error or reported_failure)
+        error = None
+        if not success:
+            if has_error:
+                error_value = raw_result.get("error", action_result.get("error"))
+                error = str(error_value)
+            else:
+                error = "tool result reported success=False"
         return ToolResult(
             tool_id=call.tool_id,
             success=success,
             output=output,
-            error=str(raw_result["error"]) if not success else None,
+            error=error,
             metadata={
                 "wall_clock_s": wall_clock_s,
                 "is_finish": toolkit_result.is_finish,

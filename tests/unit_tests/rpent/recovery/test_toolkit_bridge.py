@@ -77,6 +77,24 @@ class _ChangingFailureToolkit(Toolkit):
             },
             self._finish_with_image,
         )
+        self.add_tool(
+            "reported_failure",
+            {
+                "name": "reported_failure",
+                "description": "Return an explicit task failure",
+                "input_schema": {"type": "object"},
+            },
+            self._reported_failure,
+        )
+        self.add_tool(
+            "reported_success",
+            {
+                "name": "reported_success",
+                "description": "Return an explicit task success",
+                "input_schema": {"type": "object"},
+            },
+            self._reported_success,
+        )
 
     def _fail(self, pose: list[int]) -> dict[str, Any]:
         raise RuntimeError("fixed failure")
@@ -90,6 +108,16 @@ class _ChangingFailureToolkit(Toolkit):
     @readonly
     def _finish_with_image() -> dict[str, Any]:
         return {"_finish": True, "_image_wrist_bytes": b"wrist", "done": True}
+
+    @staticmethod
+    @readonly
+    def _reported_failure() -> dict[str, Any]:
+        return {"success": False, "diagnostics": {"reason": "missed"}}
+
+    @staticmethod
+    @readonly
+    def _reported_success() -> dict[str, Any]:
+        return {"success": True}
 
     def get_env_state(
         self,
@@ -168,6 +196,27 @@ def test_bridge_preserves_failure_output_and_normalizes_toolkit_metadata(
         "_images": ["_image_wrist_bytes"],
     }
     assert finish.metadata["is_finish"] is True
+
+
+def test_bridge_honors_explicit_success_without_reclassifying_other_results(
+    tmp_path: Path,
+) -> None:
+    toolkit = _ChangingFailureToolkit(tmp_path)
+    direct = toolkit.execute_tool("reported_failure", {})
+    assert direct.result["success"] is False
+
+    registry = ToolkitBackedRegistry(toolkit)
+
+    reported_failure = registry.invoke(ToolCall("reported_failure"))
+    assert reported_failure.success is False
+    assert reported_failure.error == "tool result reported success=False"
+
+    reported_success = registry.invoke(ToolCall("reported_success"))
+    assert reported_success.success is True
+    assert reported_success.error is None
+
+    ordinary = registry.invoke(ToolCall("finish_with_image"))
+    assert ordinary.success is True
 
 
 def test_changing_failure_state_produces_two_distinct_l1_adaptations(
