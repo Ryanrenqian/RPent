@@ -16,12 +16,21 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from time import monotonic
 from typing import Any, Mapping
 
 from rpent.tools.toolkit import Toolkit
 
-from .tools import ToolCall, ToolResult, ToolSpec
+from .persistence import TOOL_MANIFEST_SCHEMA
+from .tools import (
+    ToolCall,
+    ToolError,
+    ToolExecutor,
+    ToolRegistry,
+    ToolResult,
+    ToolSpec,
+)
 
 _IMAGE_KEYS = (
     "_image_bytes",
@@ -41,6 +50,7 @@ class ToolkitBackedRegistry:
             toolkit: RPent toolkit whose registered handlers should be exposed.
         """
         self.toolkit = toolkit
+        self._registered_specs: dict[str, ToolSpec] = {}
 
     def has(self, tool_id: str) -> bool:
         """Return whether the toolkit publishes ``tool_id``.
@@ -53,22 +63,174 @@ class ToolkitBackedRegistry:
         """
         return any(spec.tool_id == tool_id for spec in self.list_specs())
 
+    def get(self, tool_id: str) -> ToolSpec:
+        """Return a toolkit descriptor by tool ID.
+
+        Args:
+            tool_id: Planner-facing toolkit name.
+
+        Returns:
+            Matching recovery descriptor.
+
+        Raises:
+            ToolError: If the toolkit does not publish ``tool_id``.
+        """
+        for spec in self.list_specs():
+            if spec.tool_id == tool_id:
+                return spec
+        raise ToolError(f"unknown tool: {tool_id}")
+
     def list_specs(self) -> tuple[ToolSpec, ...]:
         """Convert toolkit schemas to recovery descriptors.
 
         Returns:
             Tool descriptors in the order published by the toolkit.
         """
-        return tuple(
-            ToolSpec(
-                tool_id=str(schema["name"]),
-                name=str(schema["name"]),
-                description=str(schema["description"]),
-                input_schema=dict(schema.get("input_schema", {})),
-                source="rpent-toolkit",
+        specs = []
+        for schema in self.toolkit.get_tools_spec():
+            tool_id = str(schema["name"])
+            specs.append(
+                self._registered_specs.get(tool_id)
+                or ToolSpec(
+                    tool_id=tool_id,
+                    name=tool_id,
+                    description=str(schema.get("description", "")),
+                    input_schema=dict(schema.get("input_schema", {})),
+                    source="rpent-toolkit",
+                )
             )
-            for schema in self.toolkit.get_tools_spec()
+        return tuple(specs)
+
+    @staticmethod
+    def _adapt_executor(executor: ToolExecutor) -> Any:
+        """Adapt a recovery executor to the toolkit keyword-call contract.
+
+        Args:
+            executor: Recovery callable accepting arguments and context mappings.
+
+        Returns:
+            Toolkit handler accepting keyword arguments.
+        """
+
+        def handler(**kwargs: Any) -> Mapping[str, Any]:
+            return executor(kwargs, {})
+
+        return handler
+
+    @staticmethod
+    def _toolkit_schema(spec: ToolSpec) -> dict[str, Any]:
+        """Return the Anthropic-shaped schema expected by ``Toolkit``.
+
+        Args:
+            spec: Recovery tool descriptor.
+
+        Returns:
+            Toolkit schema containing name, description, and input schema.
+        """
+        return {
+            "name": spec.tool_id,
+            "description": spec.description,
+            "input_schema": dict(spec.input_schema),
+        }
+
+    def register(self, spec: ToolSpec, executor: ToolExecutor) -> None:
+        """Register a new recovery tool in the backing toolkit.
+
+        Args:
+            spec: Tool descriptor with a unique ID.
+            executor: Recovery executor receiving arguments and context mappings.
+
+        Raises:
+            TypeError: If ``executor`` is not callable.
+            ToolError: If the tool ID is already registered.
+        """
+        if not callable(executor):
+            raise TypeError("executor must be callable")
+        if self.has(spec.tool_id):
+            raise ToolError(f"tool already registered: {spec.tool_id}")
+        self.toolkit.add_tool(
+            spec.tool_id,
+            self._toolkit_schema(spec),
+            self._adapt_executor(executor),
         )
+        self._registered_specs[spec.tool_id] = spec
+
+    def replace(self, spec: ToolSpec, executor: ToolExecutor) -> None:
+        """Replace an existing recovery tool in the backing toolkit.
+
+        Args:
+            spec: Replacement descriptor.
+            executor: Replacement recovery executor.
+
+        Raises:
+            TypeError: If ``executor`` is not callable.
+            ToolError: If the tool ID is unknown.
+        """
+        if not callable(executor):
+            raise TypeError("executor must be callable")
+        if not self.has(spec.tool_id):
+            raise ToolError(f"cannot replace unknown tool: {spec.tool_id}")
+        self.toolkit.add_tool(
+            spec.tool_id,
+            self._toolkit_schema(spec),
+            self._adapt_executor(executor),
+        )
+        self._registered_specs[spec.tool_id] = spec
+
+    def register_verified(
+        self, spec: ToolSpec, executor: ToolExecutor, report: Any
+    ) -> None:
+        """Register a candidate through the canonical verification gate.
+
+        Args:
+            spec: Verified candidate descriptor.
+            executor: Candidate recovery executor.
+            report: Verification report belonging to ``spec``.
+
+        Raises:
+            ToolError: If the report does not match or did not pass.
+        """
+        try:
+            ToolRegistry.register_verified(self, spec, executor, report)
+        except ToolError:
+            raise
+
+    def manifest(self) -> dict[str, Any]:
+        """Serialize all toolkit descriptors to a schema-tagged manifest.
+
+        Returns:
+            JSON-compatible descriptor manifest.
+        """
+        return {
+            "schema": TOOL_MANIFEST_SCHEMA,
+            "tools": [spec.to_manifest() for spec in self.list_specs()],
+        }
+
+    def save_manifest(self, path: str | Path) -> None:
+        """Persist all toolkit descriptors atomically.
+
+        Args:
+            path: Destination manifest path.
+        """
+        ToolRegistry.save_manifest(self, path)
+
+    @staticmethod
+    def load_specs(path: str | Path) -> tuple[ToolSpec, ...]:
+        """Load descriptors from a tool manifest.
+
+        Args:
+            path: Source manifest path.
+
+        Returns:
+            Reconstructed descriptors in manifest order.
+
+        Raises:
+            ValueError: If the manifest's ``tools`` field is not a list.
+        """
+        try:
+            return ToolRegistry.load_specs(path)
+        except ValueError:
+            raise
 
     def invoke(
         self, call: ToolCall, context: Mapping[str, Any] | None = None

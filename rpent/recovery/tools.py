@@ -44,7 +44,7 @@ class ToolSpec:
 
     def __post_init__(self) -> None:
         """Validate descriptor identifiers and copy container inputs."""
-        for field_name in ("tool_id", "name", "description", "version"):
+        for field_name in ("tool_id", "name", "version"):
             if not getattr(self, field_name).strip():
                 raise ValueError(f"{field_name} must not be empty")
         object.__setattr__(self, "input_schema", dict(self.input_schema))

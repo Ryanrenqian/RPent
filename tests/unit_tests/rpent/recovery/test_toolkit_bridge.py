@@ -17,13 +17,21 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from rpent.memory import MemoryManager
 from rpent.recovery import (
+    MockToolSynthesizer,
     SkillPlaybook,
     SkillRuntime,
     SkillStep,
     ToolCall,
+    ToolError,
+    ToolGapAdapter,
+    ToolGapEvent,
     ToolkitBackedRegistry,
+    ToolSpec,
+    VerificationReport,
 )
 from rpent.recovery.adapt import ParameterAdaptation, ParameterAdapter
 from rpent.recovery.diagnose import DiagnosisResult
@@ -120,11 +128,6 @@ class _ChangingFailureToolkit(Toolkit):
 
     @staticmethod
     @readonly
-    def _falsy_error(error: Any) -> dict[str, Any]:
-        return {"error": error, "done": True}
-
-    @staticmethod
-    @readonly
     def _reported_failure() -> dict[str, Any]:
         return {"success": False, "diagnostics": {"reason": "missed"}}
 
@@ -132,6 +135,11 @@ class _ChangingFailureToolkit(Toolkit):
     @readonly
     def _reported_success() -> dict[str, Any]:
         return {"success": True}
+
+    @staticmethod
+    @readonly
+    def _falsy_error(error: Any) -> dict[str, Any]:
+        return {"error": error, "done": True}
 
     def get_env_state(
         self,
@@ -165,6 +173,17 @@ class _RecordingAdapter(ParameterAdapter):
         adaptation = super().adapt(diagnosis, arguments)
         self.adaptations.append(adaptation)
         return adaptation
+
+
+class _RegistryToolkit(_ChangingFailureToolkit):
+    def get_env_state(
+        self,
+        *,
+        command: dict[str, Any],
+        result: dict[str, Any],
+        elapsed_s: float,
+    ) -> dict[str, Any]:
+        return dict(result)
 
 
 def test_bridge_preserves_failure_output_and_normalizes_toolkit_metadata(
@@ -240,6 +259,125 @@ def test_bridge_treats_falsy_error_values_as_success(tmp_path: Path) -> None:
         result = registry.invoke(ToolCall("falsy_error", {"error": error}))
         assert result.success is True
         assert result.error is None
+
+
+def test_bridge_registers_and_invokes_recovery_executor(tmp_path: Path) -> None:
+    registry = ToolkitBackedRegistry(_RegistryToolkit(tmp_path))
+    calls: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    spec = ToolSpec(
+        "generated.move",
+        "Generated move",
+        "Move through a generated executor",
+        input_schema={"type": "object"},
+    )
+
+    def executor(arguments: Any, context: Any) -> dict[str, Any]:
+        calls.append((dict(arguments), dict(context)))
+        return {"received": dict(arguments)}
+
+    registry.register(spec, executor)
+    result = registry.invoke(ToolCall("generated.move", {"distance": 2}), {"live": 1})
+
+    assert registry.has("generated.move")
+    assert registry.get("generated.move") == spec
+    assert "generated.move" in {item.tool_id for item in registry.list_specs()}
+    assert result.success is True
+    assert result.output == {"received": {"distance": 2}}
+    assert calls == [({"distance": 2}, {})]
+
+
+def test_bridge_distinguishes_register_and_replace(tmp_path: Path) -> None:
+    registry = ToolkitBackedRegistry(_RegistryToolkit(tmp_path))
+    spec = ToolSpec("generated.echo", "Echo", "Echo a version")
+    registry.register(spec, lambda arguments, context: {"version": 1})
+
+    with pytest.raises(ToolError, match="already registered"):
+        registry.register(spec, lambda arguments, context: {"version": 2})
+    with pytest.raises(ToolError, match="cannot replace unknown"):
+        registry.replace(
+            ToolSpec("generated.unknown", "Unknown", "Unknown tool"),
+            lambda arguments, context: {},
+        )
+
+    registry.replace(spec, lambda arguments, context: {"version": 2})
+    assert registry.invoke(ToolCall(spec.tool_id)).output == {"version": 2}
+
+
+def test_bridge_reuses_verified_registration_gate(tmp_path: Path) -> None:
+    registry = ToolkitBackedRegistry(_RegistryToolkit(tmp_path))
+    spec = ToolSpec("generated.safe", "Safe", "Verified tool")
+
+    def executor(arguments: Any, context: Any) -> dict[str, bool]:
+        return {"safe": True}
+
+    with pytest.raises(ToolError, match="does not belong"):
+        registry.register_verified(
+            spec,
+            executor,
+            VerificationReport("another-tool", True),
+        )
+    with pytest.raises(ToolError, match="did not pass"):
+        registry.register_verified(
+            spec, executor, VerificationReport(spec.tool_id, False)
+        )
+
+    registry.register_verified(spec, executor, VerificationReport(spec.tool_id, True))
+    assert registry.has(spec.tool_id)
+
+
+def test_bridge_manifest_round_trip(tmp_path: Path) -> None:
+    registry = ToolkitBackedRegistry(_RegistryToolkit(tmp_path))
+    spec = ToolSpec("generated.saved", "Saved", "Persisted descriptor")
+    registry.register(spec, lambda arguments, context: {})
+    path = tmp_path / "tools.json"
+
+    registry.save_manifest(path)
+
+    assert registry.manifest()["schema"] == "agentic-em/tool-manifest/v1"
+    loaded = registry.load_specs(path)
+    assert spec.tool_id in {item.tool_id for item in loaded}
+
+
+def test_tool_gap_coordinator_registers_into_bridge(tmp_path: Path) -> None:
+    registry = ToolkitBackedRegistry(_RegistryToolkit(tmp_path))
+    adapter = ToolGapAdapter(registry)
+    gap = ToolGapEvent(
+        episode_id="bridge-l3",
+        goal="restage",
+        step=0,
+        failure_family="tool_gap",
+        diagnosis={},
+        required_capability="restage",
+        missing_capability="restage",
+    )
+
+    synthesis = adapter.synthesize_tool_gap(
+        gap,
+        MockToolSynthesizer(),
+        [({"object": "mug"}, {})],
+        postcondition=lambda output, context: output.get("solved") is True,
+    )
+    invoked = registry.invoke(
+        ToolCall("capx.restage", {"object": "mug"}), {"ignored": True}
+    )
+
+    assert synthesis.registered is True
+    assert registry.has("capx.restage")
+    assert invoked.success is True
+    assert invoked.output == {"capability": "restage", "solved": True}
+
+
+def test_bridge_accepts_toolkit_schema_without_description(tmp_path: Path) -> None:
+    toolkit = _RegistryToolkit(tmp_path)
+    toolkit.add_tool(
+        "description_missing",
+        {"name": "description_missing", "input_schema": {"type": "object"}},
+        lambda: {},
+    )
+
+    spec = ToolkitBackedRegistry(toolkit).get("description_missing")
+
+    assert spec.description == ""
 
 
 def test_changing_failure_state_produces_two_distinct_l1_adaptations(
