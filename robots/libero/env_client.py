@@ -22,6 +22,7 @@ transport layer lives in :mod:`rpent.utils.rpc.socket_rpc`.
 
 from __future__ import annotations
 
+import copy
 from typing import Any
 
 import numpy as np
@@ -48,6 +49,7 @@ class LiberoEnvClient(BaseEnvClient):
         self.return_all_frames = return_all_frames
         self.terminated = False
         self.truncated = False
+        self._sim_state_cache: dict[bytes, tuple[bool, bool, Any]] = {}
         super().__init__(client, expected_meta=expected_meta)
 
     def check_done(self, term, trunc) -> None:
@@ -95,6 +97,66 @@ class LiberoEnvClient(BaseEnvClient):
 
     def raw_obs(self) -> dict:
         return self._client.call("env.raw_obs", timeout_s=self._TIMEOUT_S["default"])
+
+    @staticmethod
+    def _state_key(state) -> bytes:
+        """Build a stable local key for a flattened simulator state."""
+        array = np.asarray(state, dtype=np.float64)
+        return array.tobytes()
+
+    def get_sim_state(self) -> np.ndarray:
+        """Return and locally bookmark the current flattened simulator state."""
+        state = np.asarray(
+            self._client.call(
+                "env.get_sim_state", timeout_s=self._TIMEOUT_S["default"]
+            ),
+            dtype=np.float64,
+        ).copy()
+        self._sim_state_cache[self._state_key(state)] = (
+            self.terminated,
+            self.truncated,
+            copy.deepcopy(self.last_obs),
+        )
+        return state
+
+    def set_sim_state(self, state) -> dict[str, Any]:
+        """Restore a simulator snapshot and its client-side episode cache.
+
+        Args:
+            state: A state previously returned by :meth:`get_sim_state`.
+
+        Returns:
+            The restored raw observation returned by the environment server.
+
+        Raises:
+            KeyError: If the state was not captured by this client, because its
+                terminated/truncated cache cannot be reconstructed safely.
+        """
+        key = self._state_key(state)
+        cached = self._sim_state_cache.get(key)
+        if cached is None:
+            raise KeyError(
+                "sim state was not captured by this client; cache rollback is undefined"
+            )
+        restored = self._client.call(
+            "env.set_sim_state",
+            args=(np.asarray(state, dtype=np.float64),),
+            timeout_s=self._TIMEOUT_S["default"],
+        )
+        self.terminated, self.truncated, self.last_obs = (
+            cached[0],
+            cached[1],
+            copy.deepcopy(cached[2]),
+        )
+        return restored
+
+    def capture_sim_state(self):
+        """Capture simulator state and client episode-cache state together."""
+        return self.get_sim_state()
+
+    def restore_sim_state(self, snapshot) -> None:
+        """Restore a snapshot captured by :meth:`capture_sim_state`."""
+        self.set_sim_state(snapshot)
 
     def render_camera(
         self,

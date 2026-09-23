@@ -154,12 +154,14 @@ class LiberoEnvFacade(BaseEnvFacade):
         self._rpc.update(
             {
                 "env.raw_obs": self.raw_obs,
+                "env.get_sim_state": self.get_sim_state,
+                "env.set_sim_state": self.set_sim_state,
                 "env.render_camera": self.render_camera,
                 "env.get_camera_meta": self.get_camera_meta,
                 "env.get_task_language": self.get_task_language,
             }
         )
-        self._readonly_methods.add("env.get_task_language")
+        self._readonly_methods.update({"env.get_task_language", "env.get_sim_state"})
 
     # ---- shape helpers ----
 
@@ -234,6 +236,34 @@ class LiberoEnvFacade(BaseEnvFacade):
 
     def raw_obs(self) -> dict:
         return to_numpy_tree(self._env.current_raw_obs[self._env_idx])
+
+    def get_sim_state(self) -> np.ndarray:
+        """Return this single environment's flattened MuJoCo state.
+
+        Returns:
+            A one-dimensional NumPy representation of the current simulator
+            state for this facade's environment index.
+        """
+        states = self._env.env.get_sim_state()
+        return to_numpy_tree(states[self._env_idx])
+
+    def set_sim_state(self, state) -> dict:
+        """Restore a flattened MuJoCo state without advancing the episode.
+
+        Args:
+            state: One-dimensional flattened MuJoCo state for this environment.
+
+        Returns:
+            The restored raw observation, with the same unbatched structure as
+            :meth:`raw_obs`.
+        """
+        restored = self._env.env.set_init_state(
+            init_state=[np.asarray(state, dtype=np.float64)],
+            id=self._env_idx,
+        )
+        restored_obs = to_numpy_tree(restored[0])
+        self._env.current_raw_obs[self._env_idx] = restored_obs
+        return restored_obs
 
     def get_env_meta(self) -> dict:
         """Return the meta info this server was launched with."""
