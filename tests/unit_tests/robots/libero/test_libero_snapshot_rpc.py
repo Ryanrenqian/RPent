@@ -79,16 +79,16 @@ class _Rpc:
         raise AssertionError(method)
 
 
-def test_client_restores_pre_termination_cache():
+def test_client_capture_restore_restores_pre_termination_cache():
     rpc = _Rpc()
     client = LiberoEnvClient(rpc, expected_meta={})
     client.last_obs = {"marker": "before"}
-    state = client.get_sim_state()
+    snapshot = client.capture_sim_state()
     client.terminated = True
     client.truncated = True
     client.last_obs = {"marker": "after"}
 
-    client.set_sim_state(state)
+    client.restore_sim_state(snapshot)
 
     assert client.terminated is False
     assert client.truncated is False
@@ -96,18 +96,18 @@ def test_client_restores_pre_termination_cache():
     client.step(np.zeros(7))
 
 
-def test_client_restores_post_termination_cache():
+def test_client_capture_restore_restores_post_termination_cache():
     rpc = _Rpc()
     client = LiberoEnvClient(rpc, expected_meta={})
     client.terminated = True
     client.truncated = True
     client.last_obs = {"marker": "terminated"}
-    state = client.get_sim_state()
+    snapshot = client.capture_sim_state()
     client.terminated = False
     client.truncated = False
     client.last_obs = {"marker": "changed"}
 
-    client.set_sim_state(state)
+    client.restore_sim_state(snapshot)
 
     assert client.terminated is True
     assert client.truncated is True
@@ -116,7 +116,11 @@ def test_client_restores_post_termination_cache():
         client.step(np.zeros(7))
 
 
-def test_client_rejects_unbookmarked_state_before_remote_mutation():
-    client = LiberoEnvClient(_Rpc(), expected_meta={})
-    with pytest.raises(KeyError, match="not captured"):
-        client.set_sim_state(np.array([9.0, 9.0]))
+def test_client_set_sim_state_is_a_protocol_call_without_local_bookmark():
+    rpc = _Rpc()
+    client = LiberoEnvClient(rpc, expected_meta={})
+
+    restored = client.set_sim_state(np.array([9.0, 9.0]))
+
+    assert restored == {"marker": "restored"}
+    np.testing.assert_array_equal(rpc.state, [9.0, 9.0])

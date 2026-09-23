@@ -164,3 +164,26 @@ class TestSnapshotToolVerifier:
         assert not report.passed
         assert "case_limit_exceeded:1" in report.failures
         assert calls == ["capture", "restore"]
+
+    def test_restores_when_case_iteration_raises_after_executor_mutation(self):
+        world = {"value": 1}
+        calls: list[str] = []
+
+        def cases():
+            yield ({}, {})
+            yield ("malformed",)
+
+        verifier = SnapshotToolVerifier(
+            lambda: calls.append("capture") or world["value"],
+            lambda snapshot: calls.append("restore") or world.update(value=snapshot),
+        )
+
+        with pytest.raises(ValueError, match="not enough values to unpack"):
+            verifier.verify(
+                self._spec(),
+                lambda _args, _context: world.update(value=2) or {"ok": True},
+                cases(),
+            )
+
+        assert world["value"] == 1
+        assert calls == ["capture", "restore"]
