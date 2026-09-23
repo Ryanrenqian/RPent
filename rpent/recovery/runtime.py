@@ -70,6 +70,7 @@ class SkillRuntime:
         diagnoser: FailureDiagnoser | None = None,
         ledger: BudgetLedger | None = None,
         recovery_loop: bool = False,
+        restage: bool = False,
         parameter_adapter: ParameterAdapter | None = None,
         tool_gap_adapter: ToolGapAdapter | None = None,
         synthesizer: ToolSynthesizer | None = None,
@@ -83,6 +84,7 @@ class SkillRuntime:
             diagnoser: Optional failure diagnoser override.
             ledger: Optional reusable budget ledger.
             recovery_loop: Whether failures should loop through recovery.
+            restage: Whether L2 recovery should replay from a prior checkpoint.
             parameter_adapter: Optional L1 parameter adapter override.
             tool_gap_adapter: Optional L3 handoff and synthesis adapter.
             synthesizer: Optional L3 candidate synthesis backend.
@@ -93,6 +95,7 @@ class SkillRuntime:
         self.diagnoser = diagnoser or FailureDiagnoser()
         self.ledger = ledger
         self.recovery_loop = recovery_loop
+        self.restage = restage
         self.parameter_adapter = parameter_adapter or ParameterAdapter()
         self.tool_gap_adapter = tool_gap_adapter
         self.synthesizer = synthesizer
@@ -106,6 +109,7 @@ class SkillRuntime:
         state: Mapping[str, Any] | None = None,
         parameters: Mapping[str, Any] | None = None,
         recovery_loop: bool | None = None,
+        restage: bool | None = None,
     ) -> RuntimeResult:
         """Execute every playbook step with bounded recovery.
 
@@ -115,6 +119,7 @@ class SkillRuntime:
             state: Initial runtime state and fallback diagnosis evidence.
             parameters: Arguments merged into every step binding.
             recovery_loop: Per-call override for failure recovery looping.
+            restage: Per-call override for L2 checkpoint replay.
 
         Returns:
             Terminal runtime result with accumulated events, calls, and costs.
@@ -127,7 +132,10 @@ class SkillRuntime:
         use_recovery_loop = (
             self.recovery_loop if recovery_loop is None else recovery_loop
         )
+        use_restage = self.restage if restage is None else restage
         last_adaptation_evidence: dict[str, Any] = {}
+        restage_count = 0
+        restage_boundary_counts: dict[tuple[str, str, int, int], int] = {}
 
         def contextualize(
             decision: RecoveryDecision,
@@ -180,6 +188,7 @@ class SkillRuntime:
                         "evidence_sufficiency", {}
                     ).get("value", False),
                     **last_adaptation_evidence,
+                    **({"restage_count": restage_count} if restage_count else {}),
                     **dict(evidence_extra or {}),
                 },
                 event_id=terminal.event_id,
@@ -270,7 +279,10 @@ class SkillRuntime:
                 )
             return synthesis.candidate.spec.tool_id
 
-        for index, step in enumerate(skill.steps):
+        index = 0
+        while index < len(skill.steps):
+            step = skill.steps[index]
+            next_index = index + 1
             attempt_arguments = dict(step.argument_bindings)
             attempt_arguments.update(params)
             active_tool_id = step.tool_id
@@ -476,6 +488,69 @@ class SkillRuntime:
                             }
                         )
                         continue
+                    if (
+                        use_recovery_loop
+                        and use_restage
+                        and decision.level is RecoveryLevel.L2
+                    ):
+                        if reason is not None:
+                            return give_up(failure, reason)
+                        restage_to = next(
+                            (
+                                candidate
+                                for candidate in range(index - 1, -1, -1)
+                                if skill.steps[candidate].checks
+                            ),
+                            0,
+                        )
+                        if restage_to < index:
+                            restage_signature = (
+                                "restage",
+                                skill.skill_id,
+                                restage_to,
+                                index,
+                            )
+                            restage_reason = ledger.record_attempt(
+                                state_signature=restage_signature,
+                                turns=0,
+                                wall_clock_s=0.0,
+                                upper_model_calls=0,
+                                env_steps=0,
+                            )
+                            prior_boundary_restages = restage_boundary_counts.get(
+                                restage_signature, 0
+                            )
+                            if (
+                                restage_reason is None
+                                and prior_boundary_restages
+                                >= ledger.max_no_progress
+                            ):
+                                ledger.termination_reason = "no_progress"
+                                restage_reason = "no_progress"
+                            if restage_reason is not None:
+                                return give_up(failure, restage_reason)
+                            restage_boundary_counts[restage_signature] = (
+                                prior_boundary_restages + 1
+                            )
+                            restage_count += 1
+                            events.append(
+                                ExecutionEvent(
+                                    episode_id=episode_id,
+                                    goal=skill.goal,
+                                    step=index,
+                                    state=current_state,
+                                    completed_subgoals=failure.completed_subgoals,
+                                    tool_id=active_tool_id,
+                                    outcome="restaged",
+                                    metadata={
+                                        "restage_from": index,
+                                        "restage_to": restage_to,
+                                        "restage_count": restage_count,
+                                    },
+                                )
+                            )
+                            next_index = restage_to
+                            break
                     if use_recovery_loop and decision.level in {
                         RecoveryLevel.L0,
                         RecoveryLevel.L2,
@@ -549,6 +624,7 @@ class SkillRuntime:
                     events.append(budget_failure)
                     return give_up(budget_failure, step_reason)
                 break
+            index = next_index
         return RuntimeResult(
             True, skill.skill_id, tuple(results), tuple(events), ledger=ledger
         )

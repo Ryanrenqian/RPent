@@ -75,6 +75,25 @@ class _RecordingSynthesizer:
         )
 
 
+class _ScriptedRegistry(ToolRegistry):
+    def __init__(self, invoke_handler):
+        super().__init__()
+        self.invoke_handler = invoke_handler
+        self.calls = []
+
+    def invoke(self, call, context=None):
+        self.calls.append((call.tool_id, dict(call.arguments)))
+        return self.invoke_handler(call, dict(context or {}))
+
+
+def _register_tools(registry, *tool_ids):
+    for tool_id in tool_ids:
+        registry.register(
+            ToolSpec(tool_id, tool_id.title(), f"Execute {tool_id}"),
+            lambda arguments, context: {},
+        )
+
+
 class TestEvolutionCore:
     def test_runtime_calls_tools_and_does_not_need_tool_source(self):
         registry = ToolRegistry()
@@ -482,6 +501,276 @@ class TestBudgetAndRuntime:
         assert result.ledger.attempts == 3
         assert result.ledger.parameter_adaptations == {"pose": 2}
         assert result.ledger.wall_clock_s > 0
+
+    def test_l2_default_retries_current_step_without_restage(self):
+        target_calls = 0
+
+        def invoke(call, context):
+            nonlocal target_calls
+            if call.tool_id == "checkpoint":
+                return ToolResult(call.tool_id, True, {"checkpoint": True})
+            target_calls += 1
+            if target_calls == 1:
+                return ToolResult(
+                    call.tool_id,
+                    False,
+                    {"transcript_text": "state changed"},
+                    "blocked",
+                )
+            return ToolResult(call.tool_id, True, {"done": True})
+
+        registry = _ScriptedRegistry(invoke)
+        _register_tools(registry, "checkpoint", "target")
+        skill = SkillPlaybook(
+            "l2-default",
+            "L2 default",
+            "finish",
+            frozenset({"state_changed"}),
+            "retry without restaging by default",
+            (
+                SkillStep(
+                    "checkpoint",
+                    "establish checkpoint",
+                    "checkpoint",
+                    checks=("ready",),
+                ),
+                SkillStep("target", "finish", "target"),
+            ),
+            ("done",),
+        )
+
+        result = SkillRuntime(registry, recovery_loop=True).execute(
+            skill, episode_id="l2-default"
+        )
+
+        assert result.success is True
+        assert registry.calls == [
+            ("checkpoint", {}),
+            ("target", {}),
+            ("target", {}),
+        ]
+        assert [event.outcome for event in result.events] == [
+            "started",
+            "succeeded",
+            "started",
+            "failed",
+            "started",
+            "succeeded",
+        ]
+
+    def test_l2_restage_replays_from_nearest_prior_checkpoint(self):
+        target_calls = 0
+
+        def invoke(call, context):
+            nonlocal target_calls
+            if call.tool_id == "target":
+                target_calls += 1
+                if target_calls == 1:
+                    return ToolResult(
+                        call.tool_id,
+                        False,
+                        {"transcript_text": "object displaced"},
+                        "blocked",
+                    )
+            return ToolResult(call.tool_id, True, {"completed": call.tool_id})
+
+        registry = _ScriptedRegistry(invoke)
+        _register_tools(registry, "setup", "checkpoint", "target")
+        skill = SkillPlaybook(
+            "l2-nearest",
+            "L2 nearest checkpoint",
+            "finish",
+            frozenset({"object_displaced"}),
+            "replay the nearest checkpoint",
+            (
+                SkillStep("setup", "setup", "setup"),
+                SkillStep(
+                    "checkpoint",
+                    "checkpoint",
+                    "checkpoint",
+                    checks=("ready",),
+                ),
+                SkillStep("target", "finish", "target"),
+            ),
+            ("done",),
+        )
+
+        result = SkillRuntime(registry, recovery_loop=True).execute(
+            skill, episode_id="l2-nearest", restage=True
+        )
+
+        assert result.success is True
+        assert registry.calls == [
+            ("setup", {}),
+            ("checkpoint", {}),
+            ("target", {}),
+            ("checkpoint", {}),
+            ("target", {}),
+        ]
+        restaged = [event for event in result.events if event.outcome == "restaged"]
+        assert len(restaged) == 1
+        assert restaged[0].metadata == {
+            "restage_from": 2,
+            "restage_to": 1,
+            "restage_count": 1,
+        }
+
+    def test_repeated_l2_restage_terminates_via_no_progress(self):
+        checkpoint_calls = 0
+
+        def invoke(call, context):
+            nonlocal checkpoint_calls
+            if call.tool_id == "checkpoint":
+                checkpoint_calls += 1
+                return ToolResult(
+                    call.tool_id, True, {"checkpoint_run": checkpoint_calls}
+                )
+            return ToolResult(
+                call.tool_id,
+                False,
+                {"transcript_text": "object displaced"},
+                "blocked",
+            )
+
+        registry = _ScriptedRegistry(invoke)
+        _register_tools(registry, "checkpoint", "target")
+        skill = SkillPlaybook(
+            "l2-loop",
+            "L2 loop",
+            "finish",
+            frozenset({"object_displaced"}),
+            "bound repeated checkpoint replay",
+            (
+                SkillStep(
+                    "checkpoint",
+                    "checkpoint",
+                    "checkpoint",
+                    checks=("ready",),
+                ),
+                SkillStep("target", "finish", "target"),
+            ),
+            ("done",),
+        )
+
+        result = SkillRuntime(
+            registry, recovery_loop=True, restage=True
+        ).execute(skill, episode_id="l2-loop")
+
+        assert result.success is False
+        assert registry.calls == [
+            ("checkpoint", {}),
+            ("target", {}),
+            ("checkpoint", {}),
+            ("target", {}),
+            ("checkpoint", {}),
+            ("target", {}),
+            ("checkpoint", {}),
+            ("target", {}),
+        ]
+        assert result.decision.termination_reason == "no_progress"
+        assert result.decision.evidence["restage_count"] == 3
+        assert result.ledger.attempts == 12
+        assert len(
+            [event for event in result.events if event.outcome == "restaged"]
+        ) == 3
+
+    def test_l2_restage_at_first_step_falls_back_to_raw_retry(self):
+        calls = 0
+
+        def invoke(call, context):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return ToolResult(
+                    call.tool_id,
+                    False,
+                    {"transcript_text": "state changed"},
+                    "blocked",
+                )
+            return ToolResult(call.tool_id, True, {"done": True})
+
+        registry = _ScriptedRegistry(invoke)
+        _register_tools(registry, "target")
+        skill = SkillPlaybook(
+            "l2-first",
+            "L2 first step",
+            "finish",
+            frozenset({"state_changed"}),
+            "retry when no earlier step exists",
+            (SkillStep("target", "finish", "target"),),
+            ("done",),
+        )
+
+        result = SkillRuntime(
+            registry, recovery_loop=True, restage=True
+        ).execute(skill, episode_id="l2-first")
+
+        assert result.success is True
+        assert registry.calls == [("target", {}), ("target", {})]
+        assert all(event.outcome != "restaged" for event in result.events)
+
+    def test_l1_delta_is_not_carried_back_into_restage_prefix(self):
+        action_calls = 0
+
+        def invoke(call, context):
+            nonlocal action_calls
+            if call.tool_id == "checkpoint":
+                return ToolResult(call.tool_id, True, {"checkpoint": True})
+            action_calls += 1
+            if action_calls == 1:
+                return ToolResult(
+                    call.tool_id,
+                    False,
+                    {
+                        "end_effector_pose": {
+                            "reachable": False,
+                            "target_pose": [1, 0, 0],
+                        }
+                    },
+                    "bad pose",
+                )
+            if action_calls == 2:
+                return ToolResult(
+                    call.tool_id,
+                    False,
+                    {"transcript_text": "state changed"},
+                    "blocked",
+                )
+            return ToolResult(call.tool_id, True, {"done": True})
+
+        registry = _ScriptedRegistry(invoke)
+        _register_tools(registry, "checkpoint", "action")
+        skill = SkillPlaybook(
+            "l2-parameter-isolation",
+            "L2 parameter isolation",
+            "finish",
+            frozenset({"bad_pose", "state_changed"}),
+            "keep per-step adaptations local",
+            (
+                SkillStep(
+                    "checkpoint",
+                    "checkpoint",
+                    "checkpoint",
+                    {"stage": "original"},
+                    checks=("ready",),
+                ),
+                SkillStep("action", "finish", "action", {"pose": [0, 0, 0]}),
+            ),
+            ("done",),
+        )
+
+        result = SkillRuntime(
+            registry, recovery_loop=True, restage=True
+        ).execute(skill, episode_id="l2-parameter-isolation")
+
+        assert result.success is True
+        assert registry.calls == [
+            ("checkpoint", {"stage": "original"}),
+            ("action", {"pose": [0, 0, 0]}),
+            ("action", {"pose": [1, 0, 0]}),
+            ("checkpoint", {"stage": "original"}),
+            ("action", {"pose": [0, 0, 0]}),
+        ]
 
     def test_repeated_failed_tool_gives_up_finitely(self):
         registry = ToolRegistry()
