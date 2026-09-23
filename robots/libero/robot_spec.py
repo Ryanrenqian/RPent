@@ -158,6 +158,7 @@ def get_toolkit(
         runtime_kwargs=runtime_kwargs,
         dashboard_events=dashboard_events,
         memory=memory,
+        recovery_goal=config.prompt_vars.get("reference_tag"),
         mode=mode,
         attempts_per_session=attempts_per_session,
         state_output_dir=state_output_dir,

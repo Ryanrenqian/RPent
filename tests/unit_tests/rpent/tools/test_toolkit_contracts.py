@@ -29,7 +29,7 @@ from rpent.memory import MemoryManager
 from rpent.memory import tools as memory_tools
 from rpent.session import EnvState
 from rpent.tools import common
-from rpent.tools.toolkit import Toolkit, ToolResult, readonly
+from rpent.tools.toolkit import ToolCancelled, Toolkit, ToolResult, readonly
 
 
 class _RecordingEventSink:
@@ -50,6 +50,7 @@ class _ContractToolkit(Toolkit):
         output_dir: Path,
         *,
         memory: MemoryManager | None = None,
+        recovery_goal: str | None = None,
     ) -> None:
         self.events = _RecordingEventSink()
         self.capture_calls: list[dict[str, Any]] = []
@@ -58,6 +59,7 @@ class _ContractToolkit(Toolkit):
             dashboard_events=self.events,
             state=EnvState(output_dir),
             memory=memory or MemoryManager(output_dir / "memory"),
+            recovery_goal=recovery_goal,
         )
 
     def get_env_state(
@@ -514,6 +516,226 @@ def test_toolkit_cleans_up_operation_after_handler_failure(tmp_path: Path) -> No
     assert toolkit.execute_tool(
         "finish", {"status": "failure", "summary": "recovered"}
     ).is_finish
+
+
+def test_failed_tool_calls_are_observed_without_changing_results(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output_dir = tmp_path / "20260923-libero_10_task-t4-s7"
+    monkeypatch.setattr("rpent.tools.toolkit.get_output_dir", lambda: output_dir)
+    toolkit = _ContractToolkit(
+        output_dir,
+        recovery_goal="10_task_t4_s0",
+    )
+
+    def needs_value(*, value: int) -> dict[str, int]:
+        return {"value": value}
+
+    def cancelled() -> dict[str, Any]:
+        raise ToolCancelled("operator stopped")
+
+    def exploded() -> dict[str, Any]:
+        raise ValueError("handler exploded")
+
+    toolkit.add_tool("needs_value", {"name": "needs_value"}, needs_value)
+    toolkit.add_tool("cancelled", {"name": "cancelled"}, cancelled)
+    toolkit.add_tool("exploded", {"name": "exploded"}, exploded)
+
+    bad_arguments = toolkit.execute_tool("needs_value", {"unexpected": 1})
+    cancellation = toolkit.execute_tool("cancelled", {})
+    exception = toolkit.execute_tool("exploded", {})
+    toolkit.close()
+
+    assert bad_arguments.result == {
+        "observation": 1,
+        "error": (
+            "bad arguments for needs_value: "
+            "test_failed_tool_calls_are_observed_without_changing_results."
+            "<locals>.needs_value() got an unexpected keyword argument 'unexpected'"
+        ),
+        "got": {"unexpected": 1},
+    }
+    assert cancellation.result == {
+        "observation": 2,
+        "error": "operator stopped",
+        "code": "tool_cancelled",
+        "interrupted": True,
+    }
+    assert exception.result["observation"] == 3
+    assert exception.result["error"] == "handler exploded"
+    assert "ValueError: handler exploded" in exception.result["traceback"]
+
+    records = [
+        json.loads(line)
+        for line in (output_dir / "recovery_events.jsonl").read_text().splitlines()
+    ]
+    assert [record["event"]["tool_id"] for record in records] == [
+        "needs_value",
+        "cancelled",
+        "exploded",
+    ]
+    assert all(record["event"]["goal"] == "10_task_t4_s0" for record in records)
+    assert all(record["event"]["episode_id"] == output_dir.name for record in records)
+    assert all(
+        record["decision"]["event_id"] == record["event"]["event_id"]
+        for record in records
+    )
+    assert all(
+        evidence.get("source") != "CellRecord.scoreable"
+        for record in records
+        for evidence in record["event"]["diagnosis"].values()
+    )
+
+
+def test_explore_sessions_write_joinable_recovery_ledgers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output_dir = tmp_path / "one-cell"
+    monkeypatch.setattr("rpent.tools.toolkit.get_output_dir", lambda: output_dir)
+    sessions = [
+        _ContractToolkit(
+            output_dir / "sessions" / f"session_{index:03d}",
+            recovery_goal="task-t0-s0",
+        )
+        for index in range(2)
+    ]
+
+    for index, toolkit in enumerate(sessions):
+
+        def fail(*, session: int = index) -> dict[str, Any]:
+            raise RuntimeError(f"session {session} failed")
+
+        tool_id = f"move_{index}"
+        toolkit.add_tool(tool_id, {"name": tool_id}, fail)
+        toolkit.execute_tool(tool_id, {})
+        toolkit.close()
+
+    for index in range(2):
+        session_dir = output_dir / "sessions" / f"session_{index:03d}"
+        [recovery_record] = [
+            json.loads(line)
+            for line in (session_dir / "recovery_events.jsonl").read_text().splitlines()
+        ]
+        states = json.loads((session_dir / "states.json").read_text())
+        event = recovery_record["event"]
+        assert event["episode_id"] == f"{output_dir.name}/sessions/session_{index:03d}"
+        assert states["steps"][event["step"]]["command"]["action"] == event["tool_id"]
+
+
+def test_failed_capture_does_not_reuse_a_previous_step(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output_dir = tmp_path / "one-cell"
+    monkeypatch.setattr("rpent.tools.toolkit.get_output_dir", lambda: output_dir)
+    toolkit = _ContractToolkit(output_dir, recovery_goal="task-t0-s0")
+
+    toolkit.add_tool("move_ok", {"name": "move_ok"}, lambda: {"moved": True})
+
+    def move_bad() -> dict[str, Any]:
+        raise RuntimeError("move failed")
+
+    toolkit.add_tool("move_bad", {"name": "move_bad"}, move_bad)
+    toolkit.execute_tool("move_ok", {})
+    toolkit.capture_error = RuntimeError("capture failed")
+    toolkit.execute_tool("move_bad", {})
+    toolkit.close()
+
+    assert toolkit.state.latest_record().command == {"action": "move_ok"}
+    assert (output_dir / "recovery_events.jsonl").read_text() == ""
+
+
+def test_failed_capture_after_commit_observes_the_new_step(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output_dir = tmp_path / "one-cell"
+    monkeypatch.setattr("rpent.tools.toolkit.get_output_dir", lambda: output_dir)
+    toolkit = _ContractToolkit(output_dir, recovery_goal="task-t0-s0")
+
+    def move_bad() -> dict[str, Any]:
+        raise RuntimeError("move failed")
+
+    def capture_then_fail(
+        *,
+        command: dict[str, Any],
+        result: dict[str, Any],
+        elapsed_s: float,
+    ) -> dict[str, Any]:
+        with toolkit.state.record_step(
+            state={"committed": True},
+            command=command,
+            result=result,
+            elapsed_s=elapsed_s,
+        ):
+            pass
+        raise RuntimeError("post-commit capture failed")
+
+    toolkit.add_tool("move_bad", {"name": "move_bad"}, move_bad)
+    monkeypatch.setattr(toolkit, "get_env_state", capture_then_fail)
+    toolkit.execute_tool("move_bad", {})
+    toolkit.close()
+
+    [recovery_record] = [
+        json.loads(line)
+        for line in (output_dir / "recovery_events.jsonl").read_text().splitlines()
+    ]
+    assert recovery_record["event"]["step"] == 0
+    assert recovery_record["event"]["tool_id"] == "move_bad"
+    assert toolkit.state.latest_record().command == {"action": "move_bad"}
+
+
+def test_recovery_observer_tolerates_uninitialized_output_dir_and_logs_skip(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    def missing_output_dir() -> Path:
+        raise AssertionError("init_output_dir must be called before get_output_dir")
+
+    monkeypatch.setattr("rpent.tools.toolkit.get_output_dir", missing_output_dir)
+    toolkit = _ContractToolkit(tmp_path / "state", recovery_goal="task-t0-s0")
+
+    failed = toolkit.execute_tool("read_text_file", {"unexpected": True})
+
+    assert failed.result["error"].startswith("bad arguments for read_text_file")
+    assert "recovery observer unavailable during toolkit setup" in caplog.text
+    assert "recovery event not recorded for readonly tool read_text_file" in caplog.text
+
+
+def test_recovery_observer_exception_is_logged_without_changing_tool_result(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    toolkit = _ContractToolkit(tmp_path / "state")
+
+    def fail() -> dict[str, Any]:
+        raise RuntimeError("handler failed")
+
+    toolkit.add_tool("fail", {"name": "fail"}, fail)
+
+    def broken_observer(
+        *,
+        name: str,
+        result: dict[str, Any],
+        elapsed_s: float,
+        record: Any,
+    ) -> None:
+        assert name == "fail"
+        assert result["error"] == "handler failed"
+        assert elapsed_s >= 0
+        assert record is not None
+        raise RuntimeError("observer exploded")
+
+    monkeypatch.setattr(toolkit, "_observe_tool_failure", broken_observer)
+
+    failed = toolkit.execute_tool("fail", {})
+
+    assert failed.result["error"] == "handler failed"
+    assert "recovery observer failed for tool fail: observer exploded" in (caplog.text)
 
 
 @pytest.mark.timeout(5)

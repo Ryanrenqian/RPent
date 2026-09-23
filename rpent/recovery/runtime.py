@@ -300,8 +300,6 @@ class SkillRuntime:
                 events.append(started)
                 if not self.tools.has(active_tool_id):
                     signals = DiagnosisSignals(
-                        scoreable=True,
-                        cell_input={"scoreable": True},
                         libero_predicate=None,
                         missing_capability=active_tool_id,
                     )
@@ -357,8 +355,6 @@ class SkillRuntime:
                     mapped_evidence = map_libero_evidence(output)
                     metadata = result.metadata
                     signals = DiagnosisSignals(
-                        scoreable=True,
-                        cell_input={"scoreable": True},
                         libero_predicate=None,
                         tool_error=result.error,
                         end_effector_pose=metadata.get(
@@ -597,13 +593,13 @@ class SkillRuntime:
                 if step_reason is not None and index < len(skill.steps) - 1:
                     budget_diagnosis = self.diagnoser.diagnose(
                         DiagnosisSignals(
-                            scoreable=True,
                             cell_input={
-                                "scoreable": True,
                                 "scored_reason": step_reason,
                             },
                             libero_predicate=None,
-                            transcript_text=step_reason,
+                            scored_reason_source=(
+                                f"{type(ledger).__name__}.record_attempt"
+                            ),
                         )
                     )
                     budget_failure = budget_diagnosis.to_failure_event(

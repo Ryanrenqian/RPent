@@ -36,7 +36,6 @@ def _evidence(source: str, value: Any) -> dict[str, Any]:
 class DiagnosisSignals:
     """Signals available to the diagnoser; absent sensors remain explicitly None."""
 
-    scoreable: bool
     cell_input: Mapping[str, Any] = field(default_factory=dict)
     libero_predicate: bool | None = None
     pi05_heuristic: Any = None
@@ -46,11 +45,16 @@ class DiagnosisSignals:
     transcript_text: str | None = None
     tool_error: str | None = None
     missing_capability: str | None = None
+    scored_reason_source: str | None = None
+    _cell_record_evidence: bool = field(
+        default=False,
+        init=False,
+        repr=False,
+        compare=False,
+    )
 
     def __post_init__(self) -> None:
-        """Enforce the scoreability gate and mapping-shaped cell input."""
-        if self.scoreable is not True:
-            raise ValueError("FailureDiagnoser accepts scoreable cells only")
+        """Enforce mapping-shaped cell input."""
         if not isinstance(self.cell_input, Mapping):
             raise TypeError("cell_input must be a mapping")
 
@@ -75,7 +79,6 @@ class DiagnosisSignals:
             raise ValueError("cell_input must be explicitly marked scoreable=True")
         predicate = signals.pop("libero_predicate", cell_input.get("predicate"))
         return cls(
-            scoreable=True,
             cell_input=dict(cell_input),
             libero_predicate=predicate,
             **signals,
@@ -105,7 +108,9 @@ class DiagnosisSignals:
             raise ValueError(
                 "CellRecord.to_failure_event_input() returned no scoreable mapping"
             )
-        return cls.from_cell_input(cell_input, scoreable=True, **signals)
+        instance = cls.from_cell_input(cell_input, scoreable=True, **signals)
+        object.__setattr__(instance, "_cell_record_evidence", True)
+        return instance
 
 
 @dataclass(frozen=True, slots=True)
@@ -189,10 +194,10 @@ class FailureDiagnoser:
     def diagnose(
         self, signals: DiagnosisSignals | Mapping[str, Any], **signal_overrides: Any
     ) -> DiagnosisResult:
-        """Diagnose a scoreable cell and retain source-bearing evidence.
+        """Diagnose failure signals and retain source-bearing evidence.
 
         Args:
-            signals: Validated signals or an explicitly scoreable cell mapping.
+            signals: Validated online signals or a scoreable cell mapping.
             **signal_overrides: Runtime values accepted only with a cell mapping.
 
         Returns:
@@ -200,14 +205,13 @@ class FailureDiagnoser:
 
         Raises:
             TypeError: If overrides accompany an existing signal object.
-            ValueError: If the cell is unscorable or has an unknown scored reason.
+            ValueError: If a cell mapping is unscorable or has an unknown scored reason.
         """
         if isinstance(signals, Mapping):
             signals = DiagnosisSignals.from_cell_input(signals, **signal_overrides)
         elif signal_overrides:
             raise TypeError("signal overrides are only valid with cell_input mappings")
         evidence = {
-            "scoreable": _evidence("CellRecord.scoreable", signals.scoreable),
             "libero_predicate": _evidence(
                 "LIBERO states.json.steps[*].terminated", signals.libero_predicate
             ),
@@ -225,9 +229,16 @@ class FailureDiagnoser:
                 "tool registry lookup", signals.missing_capability
             ),
             "scored_reason": _evidence(
-                "CellRecord.scored_reason", signals.cell_input.get("scored_reason")
+                (
+                    "CellRecord.scored_reason"
+                    if signals._cell_record_evidence
+                    else signals.scored_reason_source or "diagnosis cell input"
+                ),
+                signals.cell_input.get("scored_reason"),
             ),
         }
+        if signals._cell_record_evidence:
+            evidence["scoreable"] = _evidence("CellRecord.scoreable", True)
         scored_reason = signals.cell_input.get("scored_reason")
         if scored_reason not in {
             None,

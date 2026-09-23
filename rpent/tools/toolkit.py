@@ -32,11 +32,15 @@ from functools import partial
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from rpent.dashboard.events import DashboardEventSink, StepRecordEvent
+from rpent.utils.logging import get_logger, get_output_dir
 from rpent.utils.templates import substitute
 
 if TYPE_CHECKING:
     from rpent.memory.manager import MemoryManager
+    from rpent.recovery.persistence import JsonlWriter
     from rpent.session import EnvState, StepRecord
+
+logger = get_logger("toolkit")
 
 
 @dataclass(slots=True)
@@ -187,6 +191,7 @@ class Toolkit:
         dashboard_events: DashboardEventSink,
         state: Any = None,
         memory: "MemoryManager",
+        recovery_goal: str | None = None,
     ) -> None:
         self._tools: dict[
             str,
@@ -197,7 +202,114 @@ class Toolkit:
         self._memory = memory
         self._operation_lock = threading.Lock()
         self._active_operation: _ToolOperation | None = None
+        self._recovery_goal = recovery_goal
+        self._recovery_episode_id: str | None = None
+        self._recovery_writer: JsonlWriter | None = None
+        self._recovery_unavailable_logged = False
         self._register_common_tools()
+        self._init_recovery_observer()
+
+    def _init_recovery_observer(self) -> None:
+        """Open this run's recovery ledger when a real goal is available."""
+        if not isinstance(self._recovery_goal, str) or not self._recovery_goal.strip():
+            return
+        try:
+            output_dir = get_output_dir().resolve()
+            state_output_dir = self.state.output_dir.resolve()
+            state_output_dir.relative_to(output_dir)
+            self._recovery_episode_id = state_output_dir.relative_to(
+                output_dir.parent
+            ).as_posix()
+            from rpent.recovery.persistence import JsonlWriter
+
+            self._recovery_writer = JsonlWriter(
+                state_output_dir / "recovery_events.jsonl"
+            )
+        except Exception as exc:
+            logger.warning(
+                "recovery observer unavailable during toolkit setup: %s", exc
+            )
+
+    def _observe_tool_failure(
+        self,
+        *,
+        name: str,
+        result: dict[str, Any],
+        elapsed_s: float,
+        record: StepRecord | None,
+    ) -> None:
+        """Diagnose and persist one failure without taking recovery action."""
+        if self._recovery_writer is None or self._recovery_episode_id is None:
+            if not self._recovery_unavailable_logged:
+                logger.warning(
+                    "recovery event not recorded for %s: observer has no goal or writer",
+                    name,
+                )
+                self._recovery_unavailable_logged = True
+            return
+        if record is None:
+            logger.warning(
+                "recovery event not recorded for %s: no environment step is available",
+                name,
+            )
+            return
+
+        from rpent.recovery.diagnose import DiagnosisSignals, FailureDiagnoser
+        from rpent.recovery.events import ExecutionEvent, RecoveryDecision
+        from rpent.recovery.libero_evidence import map_libero_evidence
+        from rpent.recovery.router import FailureRouter
+
+        mapped = map_libero_evidence(
+            {
+                "state": record.state,
+                "log": {"result": result},
+            }
+        )
+        signals = DiagnosisSignals(
+            libero_predicate=record.terminated,
+            tool_error=str(result.get("error", "")) or None,
+            end_effector_pose=mapped.get("end_effector_pose"),
+            gripper_opening=mapped.get("gripper_opening"),
+            transcript_text=(
+                result.get("transcript_text")
+                if isinstance(result.get("transcript_text"), str)
+                else None
+            ),
+        )
+        diagnosis = FailureDiagnoser().diagnose(signals)
+        base = ExecutionEvent(
+            episode_id=self._recovery_episode_id,
+            goal=self._recovery_goal,
+            step=record.step_idx,
+            state=record.state,
+            tool_id=name,
+            outcome="failed",
+            metadata={"elapsed_s": elapsed_s},
+        )
+        failure = diagnosis.to_failure_event(base)
+        routed = FailureRouter().route(
+            failure,
+            available_tool_ids=self._tools,
+        )
+        decision = RecoveryDecision(
+            level=routed.level,
+            action=routed.action,
+            reason=routed.reason,
+            evidence=routed.evidence,
+            source=routed.source,
+            event_id=failure.event_id,
+            episode_id=failure.episode_id,
+            step=failure.step,
+            cost={"wall_clock_s": elapsed_s},
+            termination_reason=routed.termination_reason,
+            attempts=routed.attempts,
+        )
+        self._recovery_writer.append(
+            {
+                "event": failure.to_manifest(),
+                "decision": decision.to_manifest(),
+            }
+        )
 
     # ------------------------------------------------------------------
     # Registration
@@ -273,6 +385,10 @@ class Toolkit:
         try:
             started = time.perf_counter()
             failed = False
+            record: StepRecord | None = None
+            record_before = (
+                self._state.latest_record() if self._state is not None else None
+            )
             try:
                 result = handler(**input_dict)
             except TypeError as e:
@@ -296,7 +412,6 @@ class Toolkit:
                 elapsed_s = round(time.perf_counter() - started, 2)
                 result_dict = result if isinstance(result, dict) else {"value": result}
                 command = {"action": name, **input_dict}
-                record: StepRecord | None = None
                 try:
                     captured = self.get_env_state(
                         command=command,
@@ -310,14 +425,40 @@ class Toolkit:
                         "error", f"failed to capture state after {name}: {e}"
                     )
                     captured.setdefault("traceback", traceback.format_exc())
-                else:
-                    record = self._state.latest_record()
+                finally:
+                    latest_record = (
+                        self._state.latest_record() if self._state is not None else None
+                    )
+                    if latest_record is not record_before:
+                        record = latest_record
                 result = captured
                 if failed:
                     for key, value in result_dict.items():
                         result.setdefault(key, value)
                 if record is not None:
                     self._publish_step(record)
+
+            if failed:
+                elapsed_s = round(time.perf_counter() - started, 2)
+                result_dict = result if isinstance(result, dict) else {"value": result}
+                if _is_readonly(handler):
+                    logger.warning(
+                        "recovery event not recorded for readonly tool %s: "
+                        "no environment step was produced",
+                        name,
+                    )
+                else:
+                    try:
+                        self._observe_tool_failure(
+                            name=name,
+                            result=result_dict,
+                            elapsed_s=elapsed_s,
+                            record=record,
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "recovery observer failed for tool %s: %s", name, exc
+                        )
 
             return ToolResult(name=name, result=result)
         finally:
@@ -365,7 +506,20 @@ class Toolkit:
             raise ToolCancelled("tool operation interrupted")
 
     def close(self) -> None:
-        """Release the robot-side primitives / servers at end of run. Default: no-op."""
+        """Release the robot-side primitives / servers at end of run.
+
+        The base implementation now releases the recovery ledger; subclass
+        overrides must call ``super().close()``.
+        """
+        writer = getattr(self, "_recovery_writer", None)
+        if writer is None:
+            return
+        try:
+            writer.close()
+        except Exception as exc:
+            logger.warning("failed to close recovery observer: %s", exc)
+        finally:
+            self._recovery_writer = None
 
     def solved(self) -> bool:
         """Whether the env has reported the task complete.

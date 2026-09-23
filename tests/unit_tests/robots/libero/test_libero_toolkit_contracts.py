@@ -67,7 +67,10 @@ def _run_config(memory_dir: Path, *, recipe_tag: str = "cell-s0") -> RunConfig:
     return RunConfig(
         recipe_tag=recipe_tag,
         output_dir=memory_dir.parent / "run",
-        prompt_vars={"memory_dir": str(memory_dir)},
+        prompt_vars={
+            "memory_dir": str(memory_dir),
+            "reference_tag": "libero_10_task_t0_s0",
+        },
         task_desc={},
     )
 
@@ -78,9 +81,27 @@ def test_toolkit_factory_configures_memory_access_by_mode(
 ) -> None:
     captured: list[dict[str, Any]] = []
 
-    def fake_toolkit(**kwargs: Any) -> SimpleNamespace:
-        captured.append(kwargs)
-        return SimpleNamespace(**kwargs)
+    def fake_toolkit(
+        *,
+        runtime_kwargs: dict[str, Any],
+        dashboard_events: Any,
+        memory: MemoryManager,
+        recovery_goal: str | None,
+        mode: str,
+        attempts_per_session: int,
+        state_output_dir: Path | str | None,
+    ) -> SimpleNamespace:
+        values = {
+            "runtime_kwargs": runtime_kwargs,
+            "dashboard_events": dashboard_events,
+            "memory": memory,
+            "recovery_goal": recovery_goal,
+            "mode": mode,
+            "attempts_per_session": attempts_per_session,
+            "state_output_dir": state_output_dir,
+        }
+        captured.append(values)
+        return SimpleNamespace(**values)
 
     monkeypatch.setattr(toolkit, "LiberoToolkit", fake_toolkit)
     memory_dir = tmp_path / "libero-memory"
@@ -115,6 +136,66 @@ def test_toolkit_factory_configures_memory_access_by_mode(
     assert captured[0]["mode"] == "evaluation"
     assert captured[1]["mode"] == "exploration"
     assert captured[1]["attempts_per_session"] == 2
+    assert captured[0]["recovery_goal"] == "libero_10_task_t0_s0"
+    assert captured[1]["recovery_goal"] == "libero_10_task_t0_s0"
+
+
+def test_recovery_goal_is_stable_across_seeds_for_the_same_task(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    captured_goals: list[str | None] = []
+
+    def fake_toolkit(
+        *,
+        runtime_kwargs: dict[str, Any],
+        dashboard_events: Any,
+        memory: MemoryManager,
+        recovery_goal: str | None,
+        mode: str,
+        attempts_per_session: int,
+        state_output_dir: Path | str | None,
+    ) -> SimpleNamespace:
+        captured_goals.append(recovery_goal)
+        return SimpleNamespace(
+            runtime_kwargs=runtime_kwargs,
+            dashboard_events=dashboard_events,
+            memory=memory,
+            recovery_goal=recovery_goal,
+            mode=mode,
+            attempts_per_session=attempts_per_session,
+            state_output_dir=state_output_dir,
+        )
+
+    def args_for(seed: int) -> SimpleNamespace:
+        return SimpleNamespace(
+            suite="libero_10_task",
+            task=4,
+            seed=seed,
+            planner=None,
+            molmo_endpoint=None,
+            explore=False,
+            explore_sessions=3,
+            collect_flywheel_data=False,
+            memory_profile="hf",
+            memory_dir=None,
+            output_dir=tmp_path / f"run-{seed}",
+        )
+
+    first = robot_spec._parse_config(args_for(0))
+    second = robot_spec._parse_config(args_for(9))
+    monkeypatch.setattr(toolkit, "LiberoToolkit", fake_toolkit)
+    for config in (first, second):
+        robot_spec.get_toolkit(
+            runtime_kwargs={},
+            dashboard_events=NullDashboardEventSink(),
+            config=config,
+        )
+
+    assert first.recipe_tag != second.recipe_tag
+    assert first.prompt_vars["reference_tag"] == "10_task_t4_s0"
+    assert second.prompt_vars["reference_tag"] == first.prompt_vars["reference_tag"]
+    assert captured_goals == ["10_task_t4_s0", "10_task_t4_s0"]
 
 
 def test_toolkit_modes_construct_with_fake_primitives(

@@ -161,6 +161,11 @@ class EnvState:
         self._step_open = False
 
     @property
+    def output_dir(self) -> Path:
+        """Return the output root owned by this session state."""
+        return self._output_dir
+
+    @property
     def latest_step(self) -> int | None:
         if not self._steps:
             return None

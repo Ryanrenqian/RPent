@@ -53,7 +53,11 @@ class TestDiagnoser:
         with pytest.raises(ValueError):
             diagnoser.diagnose({"predicate": False}, scoreable=False)
         result = diagnoser.diagnose(
-            {"predicate": False, "scored_reason": "budget_exhausted"},
+            {
+                "scoreable": True,
+                "predicate": False,
+                "scored_reason": "budget_exhausted",
+            },
             scoreable=True,
             sam3_observation={"blocked": True},
         )
@@ -62,22 +66,30 @@ class TestDiagnoser:
         assert all(
             (set(item) == {"source", "value"} for item in result.evidence.values())
         )
+        assert "scoreable" not in result.evidence
+        assert result.evidence["scored_reason"]["source"] == "diagnosis cell input"
 
     def test_missing_signals_are_unknown(self):
-        result = FailureDiagnoser().diagnose(
-            DiagnosisSignals(scoreable=True, cell_input={"scoreable": True})
-        )
+        result = FailureDiagnoser().diagnose(DiagnosisSignals())
         assert not result.sufficient
         assert result.failure_family == "unknown"
         assert not result.retryable
         assert result.evidence["rule_id"]["value"] is None
+        assert "scoreable" not in result.evidence
 
     def test_cell_record_adapter_remains_explicit(self):
         signals = DiagnosisSignals.from_cell_record_input(
             {"predicate": False, "scored_reason": "agent_gave_up"}
         )
-        assert signals.scoreable
         assert not signals.libero_predicate
+        assert FailureDiagnoser().diagnose(signals).evidence["scoreable"] == {
+            "source": "CellRecord.scoreable",
+            "value": True,
+        }
+        assert FailureDiagnoser().diagnose(signals).evidence["scored_reason"] == {
+            "source": "CellRecord.scored_reason",
+            "value": "agent_gave_up",
+        }
         with pytest.raises(ValueError):
             DiagnosisSignals.from_cell_record_input(None)
 
@@ -96,7 +108,7 @@ class TestDiagnoser:
 
     def test_missing_capability_does_not_invent_world_evidence(self):
         result = FailureDiagnoser().diagnose(
-            DiagnosisSignals(scoreable=True, missing_capability="insert")
+            DiagnosisSignals(missing_capability="insert")
         )
         assert result.failure_family == "missing_capability"
         assert result.required_capability == "insert"
@@ -128,7 +140,6 @@ class TestDiagnoser:
         diagnoser = FailureDiagnoser()
         result = diagnoser.diagnose(
             DiagnosisSignals(
-                scoreable=True,
                 pi05_heuristic={
                     "failure_family": "grasp_contact",
                     "retryable": True,
@@ -143,7 +154,6 @@ class TestDiagnoser:
         assert result.world_state_invalidated
         uncorroborated = diagnoser.diagnose(
             DiagnosisSignals(
-                scoreable=True,
                 pi05_heuristic={
                     "failure_family": "grasp_contact",
                     "parameter_issue": True,
@@ -165,8 +175,6 @@ class TestDiagnoser:
                 row = json.loads(line)
                 assert row["provenance"] == "synthetic"
                 signals = DiagnosisSignals(
-                    scoreable=row["scoreable"],
-                    cell_input={"scoreable": row["scoreable"]},
                     **{
                         key: row[key]
                         for key in (

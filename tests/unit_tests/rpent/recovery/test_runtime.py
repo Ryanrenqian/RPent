@@ -822,6 +822,22 @@ class TestBudgetAndRuntime:
         assert result.decision.termination_reason == "budget_exhausted"
         assert result.decision.action == RecoveryAction.GIVE_UP
         assert result.decision.evidence["evidence_sufficient"]
+        failure = next(
+            event
+            for event in result.events
+            if getattr(event, "termination_reason", None) == "budget_exhausted"
+        )
+        assert failure.failure_family == "budget_exhausted"
+        assert failure.diagnosis["rule_id"]["value"] == "scored_end_reason"
+        assert failure.diagnosis["scored_reason"] == {
+            "source": "BudgetLedger.record_attempt",
+            "value": "budget_exhausted",
+        }
+        assert failure.diagnosis["transcript_text"]["value"] is None
+        assert all(
+            not evidence["source"].startswith("CellRecord.")
+            for evidence in failure.diagnosis.values()
+        )
 
     def test_give_up_preserves_insufficient_diagnosis(self):
 

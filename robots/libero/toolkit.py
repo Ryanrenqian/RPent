@@ -45,6 +45,7 @@ class LiberoToolkit(Toolkit):
         runtime_kwargs: dict[str, Any],
         dashboard_events: DashboardEventSink,
         memory: MemoryManager,
+        recovery_goal: str | None = None,
         mode: str = "evaluation",
         attempts_per_session: int = 0,
         state_output_dir: Path | str | None = None,
@@ -57,6 +58,7 @@ class LiberoToolkit(Toolkit):
             dashboard_events=dashboard_events,
             state=state,
             memory=memory,
+            recovery_goal=recovery_goal,
         )
         self._mode = mode
         self._solved: bool = False
@@ -214,20 +216,23 @@ class LiberoToolkit(Toolkit):
     def close(self) -> None:
         """Finalize collected data and save the episode video independently."""
         try:
-            episode = self._primitives.finalize_flywheel()
-            if episode is not None:
-                logger.info("flywheel episode finalized: %s", episode)
-        except Exception as e:
-            logger.warning("failed to finalize flywheel episode: %s", e)
+            try:
+                episode = self._primitives.finalize_flywheel()
+                if episode is not None:
+                    logger.info("flywheel episode finalized: %s", episode)
+            except Exception as e:
+                logger.warning("failed to finalize flywheel episode: %s", e)
 
-        try:
-            frames = self._primitives.stop_recording()
-            if frames:
-                self._state.save("episode.mp4", frames, step=None, fps=20)
-        except Exception as e:
-            # The runner is in the cleanup path; never let a video save
-            # abort it.
-            logger.warning(f"failed to save episode video: {e}")
+            try:
+                frames = self._primitives.stop_recording()
+                if frames:
+                    self._state.save("episode.mp4", frames, step=None, fps=20)
+            except Exception as e:
+                # The runner is in the cleanup path; never let a video save
+                # abort it.
+                logger.warning(f"failed to save episode video: {e}")
+        finally:
+            super().close()
 
     def solved(self) -> bool:
         """Return whether this run has completed the task."""

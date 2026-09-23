@@ -44,14 +44,13 @@ class TestBudgetAndRuntime:
     def test_parameter_adapter_requires_explicit_numeric_target(self):
         pose = FailureDiagnoser().diagnose(
             DiagnosisSignals(
-                scoreable=True,
                 end_effector_pose={"reachable": False, "target_pose": [1, 2, 3]},
             )
         )
         adapted = ParameterAdapter.adapt(pose, {"pose": [0, 0, 0]})
         assert adapted.delta == {"pose": [1, 2, 3]}
         no_target = FailureDiagnoser().diagnose(
-            DiagnosisSignals(scoreable=True, end_effector_pose={"reachable": False})
+            DiagnosisSignals(end_effector_pose={"reachable": False})
         )
         assert not ParameterAdapter.adapt(
             no_target, {"pose": [0, 0, 0]}
