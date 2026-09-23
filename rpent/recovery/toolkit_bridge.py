@@ -89,12 +89,15 @@ class ToolkitBackedRegistry:
         specs = []
         for schema in self.toolkit.get_tools_spec():
             tool_id = str(schema["name"])
+            description = str(schema.get("description", ""))
+            if not description.strip():
+                description = tool_id
             specs.append(
                 self._registered_specs.get(tool_id)
                 or ToolSpec(
                     tool_id=tool_id,
                     name=tool_id,
-                    description=str(schema.get("description", "")),
+                    description=description,
                     input_schema=dict(schema.get("input_schema", {})),
                     source="rpent-toolkit",
                 )
@@ -187,13 +190,8 @@ class ToolkitBackedRegistry:
             executor: Candidate recovery executor.
             report: Verification report belonging to ``spec``.
 
-        Raises:
-            ToolError: If the report does not match or did not pass.
         """
-        try:
-            ToolRegistry.register_verified(self, spec, executor, report)
-        except ToolError:
-            raise
+        ToolRegistry.register_verified(self, spec, executor, report)
 
     def manifest(self) -> dict[str, Any]:
         """Serialize all toolkit descriptors to a schema-tagged manifest.
@@ -224,13 +222,8 @@ class ToolkitBackedRegistry:
         Returns:
             Reconstructed descriptors in manifest order.
 
-        Raises:
-            ValueError: If the manifest's ``tools`` field is not a list.
         """
-        try:
-            return ToolRegistry.load_specs(path)
-        except ValueError:
-            raise
+        return ToolRegistry.load_specs(path)
 
     def invoke(
         self, call: ToolCall, context: Mapping[str, Any] | None = None

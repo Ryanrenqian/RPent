@@ -179,14 +179,14 @@ class ToolSynthesisCoordinator:
     def __init__(
         self, registry: ToolRegistry, verifier: ToolVerifier | None = None
     ) -> None:
-        """Bind the target registry and optional tool verifier.
+        """Bind the target registry and explicit tool verifier.
 
         Args:
             registry: Registry receiving candidates that pass verification.
-            verifier: Optional verification policy override.
+            verifier: Verifier responsible for candidate execution, when supplied.
         """
         self.registry = registry
-        self.verifier = verifier or ToolVerifier()
+        self.verifier = verifier
 
     def synthesize_and_register(
         self,
@@ -208,7 +208,12 @@ class ToolSynthesisCoordinator:
 
         Returns:
             Candidate, report, and whether registration succeeded.
+
+        Raises:
+            ToolSynthesisError: If no explicit verifier was supplied.
         """
+        if self.verifier is None:
+            raise ToolSynthesisError("tool synthesis requires an explicit verifier")
         candidate = synthesizer.synthesize(handoff)
         report = self.verifier.verify(
             candidate.spec,

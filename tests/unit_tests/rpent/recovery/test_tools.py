@@ -14,6 +14,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from rpent.recovery import (
     SkillPlaybook,
     SkillStep,
@@ -44,3 +46,8 @@ class TestBudgetAndRuntime:
             ToolSpec("ok", "Ok", "success"), lambda args, state: {"ok": True}
         )
         assert registry.invoke(ToolCall("ok")).metadata["wall_clock_s"] >= 0
+
+    @pytest.mark.parametrize("description", ("", "   "))
+    def test_tool_spec_requires_nonempty_description(self, description):
+        with pytest.raises(ValueError, match="description must not be empty"):
+            ToolSpec("invalid", "Invalid", description)

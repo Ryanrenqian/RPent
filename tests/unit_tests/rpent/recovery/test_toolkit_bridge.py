@@ -31,6 +31,7 @@ from rpent.recovery import (
     ToolGapEvent,
     ToolkitBackedRegistry,
     ToolSpec,
+    ToolVerifier,
     VerificationReport,
 )
 from rpent.recovery.adapt import ParameterAdaptation, ParameterAdapter
@@ -416,6 +417,7 @@ def test_tool_gap_coordinator_registers_into_bridge(tmp_path: Path) -> None:
         MockToolSynthesizer(),
         [({"object": "mug"}, {})],
         postcondition=lambda output, context: output.get("solved") is True,
+        verifier=ToolVerifier(),
     )
     invoked = registry.invoke(
         ToolCall("capx.restage", {"object": "mug"}), {"ignored": True}
@@ -427,17 +429,23 @@ def test_tool_gap_coordinator_registers_into_bridge(tmp_path: Path) -> None:
     assert invoked.output == {"capability": "restage", "solved": True}
 
 
-def test_bridge_accepts_toolkit_schema_without_description(tmp_path: Path) -> None:
+def test_bridge_derives_description_from_name_when_schema_description_is_blank(
+    tmp_path: Path,
+) -> None:
     toolkit = _RegistryToolkit(tmp_path)
-    toolkit.add_tool(
-        "description_missing",
-        {"name": "description_missing", "input_schema": {"type": "object"}},
-        lambda: {},
-    )
+    for name, description in (
+        ("description_missing", None),
+        ("description_blank", "   "),
+    ):
+        schema = {"name": name, "input_schema": {"type": "object"}}
+        if description is not None:
+            schema["description"] = description
+        toolkit.add_tool(name, schema, lambda: {})
 
-    spec = ToolkitBackedRegistry(toolkit).get("description_missing")
+    registry = ToolkitBackedRegistry(toolkit)
 
-    assert spec.description == ""
+    assert registry.get("description_missing").description == "description_missing"
+    assert registry.get("description_blank").description == "description_blank"
 
 
 def test_changing_failure_state_produces_two_distinct_l1_adaptations(

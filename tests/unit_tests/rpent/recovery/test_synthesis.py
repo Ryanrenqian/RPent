@@ -24,6 +24,7 @@ from rpent.recovery import (
     ToolRegistry,
     ToolSpec,
     ToolSynthesisCoordinator,
+    ToolVerifier,
     TransportToolSynthesizer,
 )
 
@@ -42,7 +43,7 @@ class TestEvolutionCore:
         )
         handoff = RPentHandoff.from_failure(failure)
         registry = ToolRegistry()
-        coordinator = ToolSynthesisCoordinator(registry)
+        coordinator = ToolSynthesisCoordinator(registry, ToolVerifier())
         result = coordinator.synthesize_and_register(
             handoff,
             MockToolSynthesizer(),
@@ -66,7 +67,7 @@ class TestEvolutionCore:
         )
         handoff = RPentHandoff.from_failure(failure)
         registry = ToolRegistry()
-        coordinator = ToolSynthesisCoordinator(registry)
+        coordinator = ToolSynthesisCoordinator(registry, ToolVerifier())
         result = coordinator.synthesize_and_register(
             handoff,
             MockToolSynthesizer({"bad_insert": lambda args, ctx: {"solved": False}}),

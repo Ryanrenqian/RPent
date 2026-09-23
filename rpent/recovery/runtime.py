@@ -73,7 +73,7 @@ class SkillRuntime:
         parameter_adapter: ParameterAdapter | None = None,
         tool_gap_adapter: ToolGapAdapter | None = None,
         synthesizer: ToolSynthesizer | None = None,
-        verification_sandbox: ToolVerifier | None = None,
+        tool_verifier: ToolVerifier | None = None,
     ) -> None:
         """Configure tool resolution and optional recovery collaborators.
 
@@ -86,7 +86,7 @@ class SkillRuntime:
             parameter_adapter: Optional L1 parameter adapter override.
             tool_gap_adapter: Optional L3 handoff and synthesis adapter.
             synthesizer: Optional L3 candidate synthesis backend.
-            verification_sandbox: Explicit sandbox verifier for candidate execution.
+            tool_verifier: Explicit verifier responsible for candidate execution.
         """
         self.tools = tools
         self.router = router or FailureRouter()
@@ -96,7 +96,7 @@ class SkillRuntime:
         self.parameter_adapter = parameter_adapter or ParameterAdapter()
         self.tool_gap_adapter = tool_gap_adapter
         self.synthesizer = synthesizer
-        self.verification_sandbox = verification_sandbox
+        self.tool_verifier = tool_verifier
 
     def execute(
         self,
@@ -208,7 +208,7 @@ class SkillRuntime:
         ) -> RuntimeResult | str:
             if prior_reason is not None:
                 return give_up(event, prior_reason)
-            if self.verification_sandbox is None:
+            if self.tool_verifier is None:
                 synthesis_reason = ledger.record_attempt(
                     state_signature=(event.tool_id, "synthesis_without_sandbox"),
                     turns=0,
@@ -227,7 +227,7 @@ class SkillRuntime:
                     event,
                     self.synthesizer,
                     [(dict(arguments), dict(current_state))],
-                    verifier=self.verification_sandbox,
+                    verifier=self.tool_verifier,
                 )
             except Exception as exc:
                 synthesis_reason = ledger.record_attempt(

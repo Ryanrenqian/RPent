@@ -164,7 +164,7 @@ class TestEvolutionCore:
             recovery_loop=True,
             tool_gap_adapter=ToolGapAdapter(registry),
             synthesizer=synthesizer,
-            verification_sandbox=ToolVerifier(),
+            tool_verifier=ToolVerifier(),
         ).execute(skill, episode_id="ep-l3-sandbox", state=state)
 
         assert result.success is True
@@ -186,7 +186,7 @@ class TestEvolutionCore:
             recovery_loop=True,
             tool_gap_adapter=ToolGapAdapter(registry),
             synthesizer=synthesizer,
-            verification_sandbox=ToolVerifier(),
+            tool_verifier=ToolVerifier(),
         ).execute(validated(), episode_id="ep-l3-rejected")
 
         assert result.success is False
