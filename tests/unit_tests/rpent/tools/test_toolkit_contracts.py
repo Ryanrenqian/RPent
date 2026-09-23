@@ -586,6 +586,149 @@ def test_failed_tool_calls_are_observed_without_changing_results(
         for record in records
         for evidence in record["event"]["diagnosis"].values()
     )
+    assert all(
+        record["event"]["metadata"]["failure_source"] == "exception"
+        for record in records
+    )
+
+
+@pytest.mark.parametrize(
+    ("handler_result", "failure_source", "tool_error"),
+    [
+        ({"error": "x"}, "result_error", "x"),
+        ({"success": False}, "result_success_false", None),
+        (
+            {"log": {"result": {"error": "nested"}}},
+            "result_error",
+            "nested",
+        ),
+    ],
+)
+def test_reported_tool_failures_are_observed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    handler_result: dict[str, Any],
+    failure_source: str,
+    tool_error: str | None,
+) -> None:
+    output_dir = tmp_path / "one-cell"
+    monkeypatch.setattr("rpent.tools.toolkit.get_output_dir", lambda: output_dir)
+    toolkit = _ContractToolkit(output_dir, recovery_goal="task-t0-s0")
+
+    def report_failure() -> dict[str, Any]:
+        return handler_result
+
+    def preserve_result(
+        *,
+        command: dict[str, Any],
+        result: dict[str, Any],
+        elapsed_s: float,
+    ) -> dict[str, Any]:
+        with toolkit.state.record_step(
+            state={"captured": True},
+            command=command,
+            result=result,
+            elapsed_s=elapsed_s,
+        ):
+            pass
+        return result
+
+    toolkit.add_tool("report_failure", {"name": "report_failure"}, report_failure)
+    monkeypatch.setattr(toolkit, "get_env_state", preserve_result)
+
+    returned = toolkit.execute_tool("report_failure", {})
+    toolkit.close()
+
+    assert returned.result == handler_result
+    [record] = [
+        json.loads(line)
+        for line in (output_dir / "recovery_events.jsonl").read_text().splitlines()
+    ]
+    assert record["event"]["metadata"]["failure_source"] == failure_source
+    tool_error_evidence = record["event"]["diagnosis"].get("tool_error")
+    if tool_error is None:
+        assert tool_error_evidence["value"] is None
+    else:
+        assert tool_error_evidence["value"] == tool_error
+
+
+def test_successful_tool_result_is_not_observed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output_dir = tmp_path / "one-cell"
+    monkeypatch.setattr("rpent.tools.toolkit.get_output_dir", lambda: output_dir)
+    toolkit = _ContractToolkit(output_dir, recovery_goal="task-t0-s0")
+
+    def succeed() -> dict[str, bool]:
+        return {"success": True}
+
+    toolkit.add_tool("succeed", {"name": "succeed"}, succeed)
+    toolkit.execute_tool("succeed", {})
+    toolkit.close()
+
+    assert (output_dir / "recovery_events.jsonl").read_text() == ""
+
+
+@pytest.mark.parametrize(
+    "handler_result",
+    [
+        {"success": False, "detail": "grasp missed"},
+        {"error": "x", "detail": "grasp missed"},
+    ],
+)
+def test_reported_failure_preserves_head_tool_result(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    handler_result: dict[str, Any],
+) -> None:
+    output_dir = tmp_path / "one-cell"
+    monkeypatch.setattr("rpent.tools.toolkit.get_output_dir", lambda: output_dir)
+    toolkit = _ContractToolkit(output_dir, recovery_goal="task-t0-s0")
+
+    def report_failure() -> dict[str, Any]:
+        return handler_result
+
+    def capture_observation(
+        *,
+        command: dict[str, Any],
+        result: dict[str, Any],
+        elapsed_s: float,
+    ) -> dict[str, Any]:
+        with toolkit.state.record_step(
+            state={"captured": True},
+            command=command,
+            result=result,
+            elapsed_s=elapsed_s,
+        ):
+            pass
+        return {"observation": 1}
+
+    toolkit.add_tool("fail", {"name": "fail"}, report_failure)
+    monkeypatch.setattr(toolkit, "get_env_state", capture_observation)
+
+    returned = toolkit.execute_tool("fail", {})
+    toolkit.close()
+
+    assert returned.result == {"observation": 1}
+    assert len((output_dir / "recovery_events.jsonl").read_text().splitlines()) == 1
+
+
+def test_readonly_reported_failure_is_not_observed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output_dir = tmp_path / "one-cell"
+    monkeypatch.setattr("rpent.tools.toolkit.get_output_dir", lambda: output_dir)
+    toolkit = _ContractToolkit(output_dir, recovery_goal="task-t0-s0")
+
+    @readonly
+    def fail() -> dict[str, str]:
+        return {"error": "x"}
+
+    toolkit.add_tool("fail", {"name": "fail"}, fail)
+    toolkit.execute_tool("fail", {})
+    toolkit.close()
+
+    assert (output_dir / "recovery_events.jsonl").read_text() == ""
 
 
 def test_explore_sessions_write_joinable_recovery_ledgers(
@@ -687,6 +830,77 @@ def test_failed_capture_after_commit_observes_the_new_step(
     assert toolkit.state.latest_record().command == {"action": "move_bad"}
 
 
+@pytest.mark.parametrize(
+    ("handler_result", "failure_source", "tool_error", "failure_family"),
+    [
+        ({"ok": True}, "state_capture", None, "unknown"),
+        ({"error": "x"}, "result_error", "x", "tool_execution"),
+    ],
+)
+def test_capture_failure_after_commit_keeps_handler_failure_evidence_separate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    handler_result: dict[str, Any],
+    failure_source: str,
+    tool_error: str | None,
+    failure_family: str,
+) -> None:
+    output_dir = tmp_path / "one-cell"
+    monkeypatch.setattr("rpent.tools.toolkit.get_output_dir", lambda: output_dir)
+    toolkit = _ContractToolkit(output_dir, recovery_goal="task-t0-s0")
+
+    def handle() -> dict[str, Any]:
+        return handler_result
+
+    def capture_then_fail(
+        *,
+        command: dict[str, Any],
+        result: dict[str, Any],
+        elapsed_s: float,
+    ) -> dict[str, Any]:
+        with toolkit.state.record_step(
+            state={"committed": True},
+            command=command,
+            result=result,
+            elapsed_s=elapsed_s,
+        ):
+            pass
+        raise RuntimeError("post-commit capture failed")
+
+    toolkit.add_tool("move", {"name": "move"}, handle)
+    monkeypatch.setattr(toolkit, "get_env_state", capture_then_fail)
+    returned = toolkit.execute_tool("move", {})
+    toolkit.close()
+
+    assert returned.result["state_capture_error"] == "post-commit capture failed"
+    [recovery_record] = [
+        json.loads(line)
+        for line in (output_dir / "recovery_events.jsonl").read_text().splitlines()
+    ]
+    event = recovery_record["event"]
+    assert event["metadata"]["failure_source"] == failure_source
+    assert event["metadata"]["state_capture_error"] == "post-commit capture failed"
+    assert event["diagnosis"]["tool_error"]["value"] == tool_error
+    assert event["failure_family"] == failure_family
+
+
+def test_successful_handler_capture_failure_without_step_is_not_observed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output_dir = tmp_path / "one-cell"
+    monkeypatch.setattr("rpent.tools.toolkit.get_output_dir", lambda: output_dir)
+    toolkit = _ContractToolkit(output_dir, recovery_goal="task-t0-s0")
+    toolkit.capture_error = RuntimeError("capture failed")
+    toolkit.add_tool("move", {"name": "move"}, lambda: {"ok": True})
+
+    returned = toolkit.execute_tool("move", {})
+    toolkit.close()
+
+    assert returned.result["state_capture_error"] == "capture failed"
+    assert (output_dir / "recovery_events.jsonl").read_text() == ""
+
+
 def test_recovery_observer_tolerates_uninitialized_output_dir_and_logs_skip(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -723,11 +937,17 @@ def test_recovery_observer_exception_is_logged_without_changing_tool_result(
         result: dict[str, Any],
         elapsed_s: float,
         record: Any,
+        failure_source: str,
+        tool_error: str | None,
+        state_capture_error: str | None,
     ) -> None:
         assert name == "fail"
         assert result["error"] == "handler failed"
         assert elapsed_s >= 0
         assert record is not None
+        assert failure_source == "exception"
+        assert tool_error == "handler failed"
+        assert state_capture_error is None
         raise RuntimeError("observer exploded")
 
     monkeypatch.setattr(toolkit, "_observe_tool_failure", broken_observer)

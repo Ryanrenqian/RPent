@@ -237,6 +237,9 @@ class Toolkit:
         result: dict[str, Any],
         elapsed_s: float,
         record: StepRecord | None,
+        failure_source: str,
+        tool_error: str | None,
+        state_capture_error: str | None,
     ) -> None:
         """Diagnose and persist one failure without taking recovery action."""
         if self._recovery_writer is None or self._recovery_episode_id is None:
@@ -267,7 +270,7 @@ class Toolkit:
         )
         signals = DiagnosisSignals(
             libero_predicate=record.terminated,
-            tool_error=str(result.get("error", "")) or None,
+            tool_error=tool_error,
             end_effector_pose=mapped.get("end_effector_pose"),
             gripper_opening=mapped.get("gripper_opening"),
             transcript_text=(
@@ -277,6 +280,12 @@ class Toolkit:
             ),
         )
         diagnosis = FailureDiagnoser().diagnose(signals)
+        metadata: dict[str, Any] = {
+            "elapsed_s": elapsed_s,
+            "failure_source": failure_source,
+        }
+        if state_capture_error is not None:
+            metadata["state_capture_error"] = state_capture_error
         base = ExecutionEvent(
             episode_id=self._recovery_episode_id,
             goal=self._recovery_goal,
@@ -284,7 +293,7 @@ class Toolkit:
             state=record.state,
             tool_id=name,
             outcome="failed",
-            metadata={"elapsed_s": elapsed_s},
+            metadata=metadata,
         )
         failure = diagnosis.to_failure_event(base)
         routed = FailureRouter().route(
@@ -384,7 +393,11 @@ class Toolkit:
 
         try:
             started = time.perf_counter()
-            failed = False
+            handler_failed = False
+            observer_failed = False
+            failure_source: str | None = None
+            tool_error: str | None = None
+            state_capture_error: str | None = None
             record: StepRecord | None = None
             record_before = (
                 self._state.latest_record() if self._state is not None else None
@@ -396,21 +409,37 @@ class Toolkit:
                     "error": f"bad arguments for {name}: {e}",
                     "got": input_dict,
                 }
-                failed = True
+                handler_failed = True
+                observer_failed = True
+                failure_source = "exception"
+                tool_error = str(e)
             except ToolCancelled as e:
                 result = {
                     "error": str(e),
                     "code": "tool_cancelled",
                     "interrupted": True,
                 }
-                failed = True
+                handler_failed = True
+                observer_failed = True
+                failure_source = "exception"
+                tool_error = str(e)
             except Exception as e:
                 result = {"error": str(e), "traceback": traceback.format_exc()}
-                failed = True
+                handler_failed = True
+                observer_failed = True
+                failure_source = "exception"
+                tool_error = str(e)
+
+            result_dict = result if isinstance(result, dict) else {"value": result}
+            if not handler_failed:
+                from rpent.recovery.tool_result import classify_tool_result_failure
+
+                failure_source, error_value = classify_tool_result_failure(result_dict)
+                observer_failed = failure_source is not None
+                tool_error = str(error_value) if error_value is not None else None
 
             if not _is_readonly(handler):
                 elapsed_s = round(time.perf_counter() - started, 2)
-                result_dict = result if isinstance(result, dict) else {"value": result}
                 command = {"action": name, **input_dict}
                 try:
                     captured = self.get_env_state(
@@ -419,12 +448,16 @@ class Toolkit:
                         elapsed_s=elapsed_s,
                     )
                 except Exception as e:
+                    state_capture_error = str(e)
                     captured = result_dict
-                    captured["state_capture_error"] = str(e)
+                    captured["state_capture_error"] = state_capture_error
                     captured.setdefault(
                         "error", f"failed to capture state after {name}: {e}"
                     )
                     captured.setdefault("traceback", traceback.format_exc())
+                    if not observer_failed:
+                        observer_failed = True
+                        failure_source = "state_capture"
                 finally:
                     latest_record = (
                         self._state.latest_record() if self._state is not None else None
@@ -432,16 +465,23 @@ class Toolkit:
                     if latest_record is not record_before:
                         record = latest_record
                 result = captured
-                if failed:
+                if handler_failed:
                     for key, value in result_dict.items():
                         result.setdefault(key, value)
                 if record is not None:
                     self._publish_step(record)
 
-            if failed:
+            result_dict = result if isinstance(result, dict) else {"value": result}
+
+            if observer_failed:
                 elapsed_s = round(time.perf_counter() - started, 2)
-                result_dict = result if isinstance(result, dict) else {"value": result}
-                if _is_readonly(handler):
+                if failure_source is None:
+                    logger.error(
+                        "recovery event not recorded for failed tool %s: "
+                        "failure source was not set",
+                        name,
+                    )
+                elif _is_readonly(handler):
                     logger.warning(
                         "recovery event not recorded for readonly tool %s: "
                         "no environment step was produced",
@@ -454,6 +494,9 @@ class Toolkit:
                             result=result_dict,
                             elapsed_s=elapsed_s,
                             record=record,
+                            failure_source=failure_source,
+                            tool_error=tool_error,
+                            state_capture_error=state_capture_error,
                         )
                     except Exception as exc:
                         logger.warning(

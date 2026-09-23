@@ -23,6 +23,7 @@ from typing import Any, Mapping
 from rpent.tools.toolkit import Toolkit
 
 from .persistence import TOOL_MANIFEST_SCHEMA
+from .tool_result import classify_tool_result_failure
 from .tools import (
     ToolCall,
     ToolError,
@@ -266,19 +267,11 @@ class ToolkitBackedRegistry:
         if image_keys:
             output["_images"] = image_keys
 
-        action_result = raw_result
-        log = raw_result.get("log")
-        if isinstance(log, Mapping) and isinstance(log.get("result"), Mapping):
-            action_result = log["result"]
-        error_value = raw_result.get("error") or action_result.get("error")
-        has_error = bool(error_value)
-        reported_failure = (
-            raw_result.get("success") is False or action_result.get("success") is False
-        )
-        success = not (has_error or reported_failure)
+        failure_source, error_value = classify_tool_result_failure(raw_result)
+        success = failure_source is None
         error = None
         if not success:
-            if has_error:
+            if error_value:
                 error = str(error_value)
             else:
                 error = "tool result reported success=False"
