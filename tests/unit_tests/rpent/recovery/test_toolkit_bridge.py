@@ -186,6 +186,66 @@ class _RegistryToolkit(_ChangingFailureToolkit):
         return dict(result)
 
 
+class _StrictParameterToolkit(Toolkit):
+    def __init__(self, output_dir: Path) -> None:
+        self.calls: list[tuple[str, dict[str, Any]]] = []
+        self.move_calls = 0
+        init_output_dir(output_dir / "logs")
+        super().__init__(
+            dashboard_events=_RecordingEventSink(),
+            state=EnvState(output_dir),
+            memory=MemoryManager(output_dir / "memory"),
+        )
+        schemas = {
+            "move": self._move,
+            "place": self._place,
+            "undeclared_pose": self._undeclared_pose,
+        }
+        for name, handler in schemas.items():
+            self.add_tool(
+                name,
+                {
+                    "name": name,
+                    "description": f"Strict {name} handler",
+                    "input_schema": {"type": "object"},
+                },
+                handler,
+            )
+
+    def _move(self, pose: list[int]) -> dict[str, bool]:
+        self.calls.append(("move", {"pose": pose}))
+        self.move_calls += 1
+        if self.move_calls == 1:
+            raise RuntimeError("bad pose")
+        return {"moved": True}
+
+    def _place(self, other: int) -> dict[str, bool]:
+        self.calls.append(("place", {"other": other}))
+        return {"placed": True}
+
+    def _undeclared_pose(self, other: int) -> dict[str, bool]:
+        self.calls.append(("undeclared_pose", {"other": other}))
+        raise RuntimeError("bad pose")
+
+    def get_env_state(
+        self,
+        *,
+        command: dict[str, Any],
+        result: dict[str, Any],
+        elapsed_s: float,
+    ) -> dict[str, Any]:
+        return {
+            **result,
+            "end_effector_pose": {
+                "reachable": False,
+                "target_pose": [1, 0, 0],
+            },
+        }
+
+    def solved(self) -> bool:
+        return False
+
+
 def test_bridge_preserves_failure_output_and_normalizes_toolkit_metadata(
     tmp_path: Path,
 ) -> None:
@@ -410,3 +470,61 @@ def test_changing_failure_state_produces_two_distinct_l1_adaptations(
         result.decision.termination_reason
         != "L1 adaptation produced no argument change"
     )
+
+
+def test_l1_adaptation_does_not_leak_into_later_strict_step(tmp_path: Path) -> None:
+    toolkit = _StrictParameterToolkit(tmp_path)
+    skill = SkillPlaybook(
+        skill_id="strict-cross-step",
+        name="Strict cross-step",
+        goal="move then place",
+        trigger_labels=frozenset({"bad_pose"}),
+        diagnosis="correct the move pose",
+        steps=(
+            SkillStep("move", "move", "move", {"pose": [0, 0, 0]}),
+            SkillStep("place", "place", "place", {"other": 1}),
+        ),
+        verification_checks=("placed",),
+    )
+
+    result = SkillRuntime(
+        ToolkitBackedRegistry(toolkit), recovery_loop=True
+    ).execute(skill, episode_id="strict-cross-step")
+
+    assert result.success is True
+    assert toolkit.calls == [
+        ("move", {"pose": [0, 0, 0]}),
+        ("move", {"pose": [1, 0, 0]}),
+        ("place", {"other": 1}),
+    ]
+
+
+def test_l1_does_not_inject_undeclared_argument_into_strict_step(
+    tmp_path: Path,
+) -> None:
+    toolkit = _StrictParameterToolkit(tmp_path)
+    skill = SkillPlaybook(
+        skill_id="strict-current-step",
+        name="Strict current-step",
+        goal="reject undeclared pose",
+        trigger_labels=frozenset({"bad_pose"}),
+        diagnosis="pose evidence does not declare an argument",
+        steps=(
+            SkillStep(
+                "move",
+                "move",
+                "undeclared_pose",
+                {"other": 7},
+            ),
+        ),
+        verification_checks=("moved",),
+    )
+
+    result = SkillRuntime(
+        ToolkitBackedRegistry(toolkit), recovery_loop=True
+    ).execute(skill, episode_id="strict-current-step")
+
+    assert result.success is False
+    assert toolkit.calls == [("undeclared_pose", {"other": 7})]
+    assert result.error == "bad pose"
+    assert result.decision.termination_reason == "L1 无可用自适应证据"

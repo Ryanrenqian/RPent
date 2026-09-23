@@ -58,9 +58,9 @@ class ParameterAdapter:
 
     @staticmethod
     def _argument_key(
-        arguments: Mapping[str, Any], candidates: tuple[str, ...], fallback: str
-    ) -> str:
-        return next((key for key in candidates if key in arguments), fallback)
+        arguments: Mapping[str, Any], candidates: tuple[str, ...]
+    ) -> str | None:
+        return next((key for key in candidates if key in arguments), None)
 
     @staticmethod
     def adapt(
@@ -84,9 +84,9 @@ class ParameterAdapter:
                 pose, ("delta", "deviation", "pose_error", "position_error")
             )
             key = ParameterAdapter._argument_key(
-                arguments, ("end_effector_pose", "ee_pose", "pose"), "pose"
+                arguments, ("end_effector_pose", "ee_pose", "pose")
             )
-            if target is not None:
+            if key is not None and target is not None:
                 return ParameterAdaptation(
                     {key: target},
                     "pose target copied from end-effector evidence",
@@ -153,9 +153,11 @@ class ParameterAdapter:
                 )
                 delta_value = _first(opening_evidence, ("delta", "opening_delta"))
             key = ParameterAdapter._argument_key(
-                arguments, ("gripper_opening", "opening"), "gripper_opening"
+                arguments, ("gripper_opening", "opening")
             )
-            if target is not None or isinstance(delta_value, Real):
+            if key is not None and (
+                target is not None or isinstance(delta_value, Real)
+            ):
                 old = arguments.get(key)
                 new_value = (
                     target
@@ -191,28 +193,29 @@ class ParameterAdapter:
                 )
                 delta_value = _first(distance_data, ("delta", "distance_delta"))
                 key = ParameterAdapter._argument_key(
-                    arguments, ("approach_distance", "distance"), "approach_distance"
+                    arguments, ("approach_distance", "distance")
                 )
-                old = arguments.get(key)
-                new_value = (
-                    target
-                    if target is not None
-                    else (
-                        old + delta_value
-                        if isinstance(old, Real) and isinstance(delta_value, Real)
-                        else None
+                if key is not None:
+                    old = arguments.get(key)
+                    new_value = (
+                        target
+                        if target is not None
+                        else (
+                            old + delta_value
+                            if isinstance(old, Real) and isinstance(delta_value, Real)
+                            else None
+                        )
                     )
-                )
-                if new_value is not None and new_value != old:
-                    return ParameterAdaptation(
-                        {key: new_value},
-                        "approach distance target/delta from grasp evidence",
-                        True,
-                        {
-                            "signal": "approach_distance",
-                            "source": "explicit_target_or_delta",
-                            "old": old,
-                            "new": new_value,
-                        },
-                    )
+                    if new_value is not None and new_value != old:
+                        return ParameterAdaptation(
+                            {key: new_value},
+                            "approach distance target/delta from grasp evidence",
+                            True,
+                            {
+                                "signal": "approach_distance",
+                                "source": "explicit_target_or_delta",
+                                "old": old,
+                                "new": new_value,
+                            },
+                        )
         return ParameterAdaptation({}, "L1 无可用自适应证据", False, {})

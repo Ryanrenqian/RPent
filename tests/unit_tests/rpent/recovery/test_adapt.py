@@ -14,7 +14,10 @@
 
 from __future__ import annotations
 
+import pytest
+
 from rpent.recovery import (
+    DiagnosisResult,
     DiagnosisSignals,
     FailureDiagnoser,
     SkillPlaybook,
@@ -53,3 +56,45 @@ class TestBudgetAndRuntime:
         assert not ParameterAdapter.adapt(
             no_target, {"pose": [0, 0, 0]}
         ).adaptation_available
+
+    @pytest.mark.parametrize(
+        "evidence",
+        (
+            {
+                "end_effector_pose": {
+                    "source": "test",
+                    "value": {"reachable": False, "target_pose": [1, 2, 3]},
+                }
+            },
+            {
+                "gripper_opening": {
+                    "source": "test",
+                    "value": {"value": 0.0, "target_opening": 0.4},
+                },
+                "transcript_text": {"source": "test", "value": "grasp failed"},
+            },
+            {
+                "gripper_opening": {"source": "test", "value": {"value": 0.0}},
+                "transcript_text": {"source": "test", "value": "grasp failed"},
+                "approach_distance": {
+                    "source": "test",
+                    "value": {"target": 0.2},
+                },
+            },
+        ),
+    )
+    def test_parameter_adapter_does_not_invent_argument_names(self, evidence):
+        diagnosis = DiagnosisResult(
+            "parameter_or_pose",
+            evidence,
+            retryable=False,
+            parameter_issue=True,
+            world_state_invalidated=False,
+            required_capability=None,
+            sufficient=True,
+        )
+
+        adaptation = ParameterAdapter.adapt(diagnosis, {"other": 7})
+
+        assert adaptation.delta == {}
+        assert adaptation.adaptation_available is False

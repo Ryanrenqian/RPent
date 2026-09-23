@@ -475,7 +475,6 @@ class SkillRuntime:
                                 "adaptation_reason": adaptation.reason,
                             }
                         )
-                        params.update(adaptation.delta)
                         continue
                     if use_recovery_loop and decision.level in {
                         RecoveryLevel.L0,
