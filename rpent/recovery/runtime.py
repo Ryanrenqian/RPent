@@ -522,8 +522,7 @@ class SkillRuntime:
                             )
                             if (
                                 restage_reason is None
-                                and prior_boundary_restages
-                                >= ledger.max_no_progress
+                                and prior_boundary_restages >= ledger.max_no_progress
                             ):
                                 ledger.termination_reason = "no_progress"
                                 restage_reason = "no_progress"

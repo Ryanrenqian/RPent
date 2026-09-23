@@ -652,9 +652,9 @@ class TestBudgetAndRuntime:
             ("done",),
         )
 
-        result = SkillRuntime(
-            registry, recovery_loop=True, restage=True
-        ).execute(skill, episode_id="l2-loop")
+        result = SkillRuntime(registry, recovery_loop=True, restage=True).execute(
+            skill, episode_id="l2-loop"
+        )
 
         assert result.success is False
         assert registry.calls == [
@@ -670,9 +670,9 @@ class TestBudgetAndRuntime:
         assert result.decision.termination_reason == "no_progress"
         assert result.decision.evidence["restage_count"] == 3
         assert result.ledger.attempts == 12
-        assert len(
-            [event for event in result.events if event.outcome == "restaged"]
-        ) == 3
+        assert (
+            len([event for event in result.events if event.outcome == "restaged"]) == 3
+        )
 
     def test_l2_restage_at_first_step_falls_back_to_raw_retry(self):
         calls = 0
@@ -701,9 +701,9 @@ class TestBudgetAndRuntime:
             ("done",),
         )
 
-        result = SkillRuntime(
-            registry, recovery_loop=True, restage=True
-        ).execute(skill, episode_id="l2-first")
+        result = SkillRuntime(registry, recovery_loop=True, restage=True).execute(
+            skill, episode_id="l2-first"
+        )
 
         assert result.success is True
         assert registry.calls == [("target", {}), ("target", {})]
@@ -759,9 +759,9 @@ class TestBudgetAndRuntime:
             ("done",),
         )
 
-        result = SkillRuntime(
-            registry, recovery_loop=True, restage=True
-        ).execute(skill, episode_id="l2-parameter-isolation")
+        result = SkillRuntime(registry, recovery_loop=True, restage=True).execute(
+            skill, episode_id="l2-parameter-isolation"
+        )
 
         assert result.success is True
         assert registry.calls == [

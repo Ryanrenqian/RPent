@@ -495,9 +495,9 @@ def test_l1_adaptation_does_not_leak_into_later_strict_step(tmp_path: Path) -> N
         verification_checks=("placed",),
     )
 
-    result = SkillRuntime(
-        ToolkitBackedRegistry(toolkit), recovery_loop=True
-    ).execute(skill, episode_id="strict-cross-step")
+    result = SkillRuntime(ToolkitBackedRegistry(toolkit), recovery_loop=True).execute(
+        skill, episode_id="strict-cross-step"
+    )
 
     assert result.success is True
     assert toolkit.calls == [
@@ -528,9 +528,9 @@ def test_l1_does_not_inject_undeclared_argument_into_strict_step(
         verification_checks=("moved",),
     )
 
-    result = SkillRuntime(
-        ToolkitBackedRegistry(toolkit), recovery_loop=True
-    ).execute(skill, episode_id="strict-current-step")
+    result = SkillRuntime(ToolkitBackedRegistry(toolkit), recovery_loop=True).execute(
+        skill, episode_id="strict-current-step"
+    )
 
     assert result.success is False
     assert toolkit.calls == [("undeclared_pose", {"other": 7})]
