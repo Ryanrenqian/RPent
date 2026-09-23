@@ -74,6 +74,7 @@ from .tools import (
 from .verification import (
     OutcomeVerifier,
     SkillVerifier,
+    SnapshotToolVerifier,
     ToolVerifier,
     VerificationReport,
 )
@@ -103,6 +104,7 @@ __all__ = [
     "RuntimeResult",
     "SkillRuntime",
     "OutcomeVerifier",
+    "SnapshotToolVerifier",
     "SkillVerifier",
     "ToolVerifier",
     "VerificationReport",

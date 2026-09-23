@@ -23,6 +23,7 @@ from rpent.recovery import (
     SkillStep,
     SkillValidation,
     SkillVerifier,
+    SnapshotToolVerifier,
     ToolRegistry,
     ToolSpec,
     ToolVerifier,
@@ -92,3 +93,74 @@ class TestEvolutionCore:
         )
         assert not report.passed
         assert "held_out" in report.failures
+
+
+class TestSnapshotToolVerifier:
+    def _spec(self):
+        return ToolSpec("sandbox-tool", "Sandbox", "mutate state", version="1")
+
+    def test_restores_after_success_and_rolls_back_external_state(self):
+        world = {"value": 1}
+        calls: list[str] = []
+
+        def capture():
+            calls.append("capture")
+            return world["value"]
+
+        def restore(snapshot):
+            calls.append("restore")
+            world["value"] = snapshot
+
+        verifier = SnapshotToolVerifier(capture, restore)
+        report = verifier.verify(
+            self._spec(),
+            lambda _args, _context: world.update(value=2) or {"ok": True},
+            [({}, {})],
+        )
+
+        assert report.passed
+        assert world["value"] == 1
+        assert calls == ["capture", "restore"]
+
+    def test_restores_after_executor_exception_and_failed_verification(self):
+        for executor, postcondition in [
+            (lambda _args, _context: (_ for _ in ()).throw(RuntimeError("boom")), None),
+            (
+                lambda _args, _context: {"ok": False},
+                lambda output, _context: output["ok"],
+            ),
+        ]:
+            calls: list[str] = []
+            verifier = SnapshotToolVerifier(
+                lambda: calls.append("capture") or object(),
+                lambda _snapshot: calls.append("restore"),
+            )
+            report = verifier.verify(
+                self._spec(),
+                executor,
+                [({}, {})],
+                postcondition=postcondition,
+            )
+            assert not report.passed
+            assert calls == ["capture", "restore"]
+
+    def test_restore_failure_is_visible(self):
+        verifier = SnapshotToolVerifier(
+            lambda: "snapshot",
+            lambda _snapshot: (_ for _ in ()).throw(RuntimeError("restore failed")),
+        )
+        with pytest.raises(RuntimeError, match="restore failed"):
+            verifier.verify(self._spec(), lambda _args, _context: {}, [({}, {})])
+
+    def test_case_limit_still_restores_once(self):
+        calls: list[str] = []
+        verifier = SnapshotToolVerifier(
+            lambda: calls.append("capture") or None,
+            lambda _snapshot: calls.append("restore"),
+        )
+        report = verifier.verify(
+            self._spec(), lambda _args, _context: {}, [({}, {}), ({}, {})], max_cases=1
+        )
+        assert not report.passed
+        assert "case_limit_exceeded:1" in report.failures
+        assert calls == ["capture", "restore"]

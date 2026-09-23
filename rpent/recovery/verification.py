@@ -131,6 +131,52 @@ class ToolVerifier:
         )
 
 
+class SnapshotToolVerifier(ToolVerifier):
+    """Verify tools while restoring an injected external-state snapshot."""
+
+    def __init__(self, capture: Callable[[], Any], restore: Callable[[Any], None]):
+        """Create a verifier around state capture and restore callables.
+
+        Args:
+            capture: Callable invoked once before candidate verification.
+            restore: Callable invoked once in a ``finally`` block with the
+                captured snapshot.
+
+        Raises:
+            TypeError: If either callback is not callable.
+        """
+        if not callable(capture):
+            raise TypeError("capture must be callable")
+        if not callable(restore):
+            raise TypeError("restore must be callable")
+        self._capture = capture
+        self._restore = restore
+
+    def verify(
+        self,
+        spec: ToolSpec,
+        executor: ToolExecutor,
+        cases: Iterable[Case],
+        *,
+        precondition: Check | None = None,
+        postcondition: Check | None = None,
+        max_cases: int = 128,
+    ) -> VerificationReport:
+        """Verify a tool and restore the captured state on every exit path."""
+        snapshot = self._capture()
+        try:
+            return super().verify(
+                spec,
+                executor,
+                cases,
+                precondition=precondition,
+                postcondition=postcondition,
+                max_cases=max_cases,
+            )
+        finally:
+            self._restore(snapshot)
+
+
 class OutcomeVerifier:
     """Verify the task-level outcome after a skill runtime execution."""
 
