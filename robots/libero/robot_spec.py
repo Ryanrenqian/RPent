@@ -153,6 +153,7 @@ def get_toolkit(
         root=config.prompt_vars.get("memory_dir") or get_memory_dir("libero"),
         memory_access="inbox_write" if explore else "read_only",
         inbox_cell_tag=config.recipe_tag if explore else None,
+        skill_library_dir=config.prompt_vars.get("skill_library_dir"),
     )
     return LiberoToolkit(
         runtime_kwargs=runtime_kwargs,
@@ -204,6 +205,11 @@ def _add_cli_args(parser: argparse.ArgumentParser, use_dashboard: bool) -> None:
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Merge exploration output into layered memory (default: enabled).",
+    )
+    parser.add_argument(
+        "--skill-library-dir",
+        default=None,
+        help="Read-only validated skill library for the acting agent.",
     )
     parser.add_argument(
         "--explore-attempts-per-session",
@@ -297,6 +303,32 @@ def _parse_config(args: argparse.Namespace) -> RunConfig:
         if args.memory_dir
         else get_memory_dir("libero")
     )
+    requested_skill_library = getattr(args, "skill_library_dir", None)
+    skill_library_dir = None
+    if requested_skill_library is not None:
+        skill_library_dir = Path(requested_skill_library).expanduser().resolve()
+        if skill_library_dir.is_relative_to(memory_dir) or memory_dir.is_relative_to(
+            skill_library_dir
+        ):
+            raise ValueError("--skill-library-dir must be separate from --memory-dir")
+        if not skill_library_dir.is_dir():
+            raise ValueError(f"skill library directory not found: {skill_library_dir}")
+        required_skill_files = (
+            "grasp.md",
+            "localize.md",
+            "transport.md",
+            "contact.md",
+        )
+        missing = [
+            name
+            for name in required_skill_files
+            if not (skill_library_dir / name).is_file()
+        ]
+        if missing:
+            raise ValueError(
+                f"skill library at {skill_library_dir} is missing required files: "
+                + ", ".join(missing)
+            )
     local_eval = not explore and memory_profile == "local"
     if local_eval:
         if planner == "flash":
@@ -335,6 +367,8 @@ def _parse_config(args: argparse.Namespace) -> RunConfig:
         "session_number": 1,
         "session_max": max(1, args.explore_sessions) if explore else 1,
     }
+    if skill_library_dir is not None:
+        prompt_vars["skill_library_dir"] = str(skill_library_dir)
 
     output_dir = args.output_dir
     if output_dir is None:

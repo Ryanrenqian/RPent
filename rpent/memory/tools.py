@@ -63,6 +63,7 @@ def _check_memory_access(
     access: str,
     memory_access: str,
     cell_tag: str | None,
+    skill_library_dir: Path | str | None,
 ) -> None:
     """Enforce current-memory read/write permissions.
 
@@ -75,6 +76,20 @@ def _check_memory_access(
         return
     resolved = _resolve_memory_path(path)
     bucket = _classify_memory_path(resolved, memory_root=memory_root)
+    if bucket != "current" and skill_library_dir is not None:
+        skill_root = Path(skill_library_dir).expanduser().resolve()
+        requested = Path(path)
+        if not requested.is_absolute():
+            requested = get_repo_root() / requested
+        if requested.absolute().is_relative_to(skill_root) or resolved.is_relative_to(
+            skill_root
+        ):
+            if access == "write":
+                raise PermissionError(
+                    "skill library is read-only for the acting agent; "
+                    "the curator writes it"
+                )
+            return
     if bucket == "non_memory":
         return
     if bucket == "foreign":
@@ -112,6 +127,7 @@ def read_text_file(
     memory_root: Path,
     memory_access: str,
     cell_tag: str | None,
+    skill_library_dir: Path | str | None = None,
     max_chars: int = 40000,
 ) -> dict:
     _check_memory_access(
@@ -120,6 +136,7 @@ def read_text_file(
         access="read",
         memory_access=memory_access,
         cell_tag=cell_tag,
+        skill_library_dir=skill_library_dir,
     )
     from rpent.tools import common
 
@@ -134,6 +151,7 @@ def write_text_file(
     memory_root: Path,
     memory_access: str,
     cell_tag: str | None,
+    skill_library_dir: Path | str | None = None,
 ) -> dict:
     _check_memory_access(
         path,
@@ -141,6 +159,7 @@ def write_text_file(
         access="write",
         memory_access=memory_access,
         cell_tag=cell_tag,
+        skill_library_dir=skill_library_dir,
     )
     from rpent.tools import common
 
@@ -154,6 +173,7 @@ def list_dir(
     memory_root: Path,
     memory_access: str,
     cell_tag: str | None,
+    skill_library_dir: Path | str | None = None,
 ) -> dict:
     _check_memory_access(
         path,
@@ -161,6 +181,7 @@ def list_dir(
         access="read",
         memory_access=memory_access,
         cell_tag=cell_tag,
+        skill_library_dir=skill_library_dir,
     )
     from rpent.tools import common
 

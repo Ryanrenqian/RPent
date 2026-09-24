@@ -136,10 +136,16 @@ class MemoryManager:
         *,
         memory_access: str = "read_only",
         inbox_cell_tag: str | None = None,
+        skill_library_dir: Path | str | None = None,
     ) -> None:
         self._root = Path(root).resolve()
         self._memory_access = memory_access
         self._inbox_cell_tag = inbox_cell_tag
+        self._skill_library_dir = (
+            Path(skill_library_dir).expanduser().resolve()
+            if skill_library_dir is not None
+            else None
+        )
 
     @property
     def root(self) -> Path:
@@ -161,18 +167,21 @@ class MemoryManager:
                 memory_root=self._root,
                 memory_access=self._memory_access,
                 cell_tag=self._inbox_cell_tag,
+                skill_library_dir=self._skill_library_dir,
             ),
             "write_text_file": partial(
                 memory_tools.write_text_file,
                 memory_root=self._root,
                 memory_access=self._memory_access,
                 cell_tag=self._inbox_cell_tag,
+                skill_library_dir=self._skill_library_dir,
             ),
             "list_dir": partial(
                 memory_tools.list_dir,
                 memory_root=self._root,
                 memory_access=self._memory_access,
                 cell_tag=self._inbox_cell_tag,
+                skill_library_dir=self._skill_library_dir,
             ),
         }
         bindings: dict[str, tuple[dict[str, Any], Callable[..., Any]]] = {}
