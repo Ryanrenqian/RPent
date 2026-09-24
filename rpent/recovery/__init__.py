@@ -35,6 +35,14 @@ from .classify import (
     signals_from_cell_dir,
 )
 from .diagnose import DiagnosisResult, DiagnosisSignals, FailureDiagnoser
+from .episodes import (
+    EpisodeFailure,
+    RecoveryEpisode,
+    extract_vla_objects,
+    pair_recovery_episodes,
+    same_vla_subgoal,
+    write_recovery_episodes,
+)
 from .events import (
     ExecutionEvent,
     FailureEvent,
@@ -86,6 +94,12 @@ __all__ = [
     "RecoveryLevel",
     "RecoveryAction",
     "ToolGapEvent",
+    "EpisodeFailure",
+    "RecoveryEpisode",
+    "extract_vla_objects",
+    "same_vla_subgoal",
+    "pair_recovery_episodes",
+    "write_recovery_episodes",
     "BudgetLedger",
     "BudgetLimits",
     "DiagnosisResult",
