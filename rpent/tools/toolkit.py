@@ -259,23 +259,25 @@ class Toolkit:
 
         from rpent.recovery.diagnose import DiagnosisSignals, FailureDiagnoser
         from rpent.recovery.events import ExecutionEvent, RecoveryDecision
-        from rpent.recovery.libero_evidence import map_libero_evidence
+        from rpent.recovery.libero_evidence import (
+            libero_tool_evidence,
+            map_libero_evidence,
+        )
         from rpent.recovery.router import FailureRouter
 
+        tool_result = record.result if isinstance(record.result, dict) else {}
         mapped = map_libero_evidence(
-            {
-                "state": record.state,
-                "log": {"result": result},
-            }
+            {"state": record.state, "log": {"result": tool_result}}
         )
         signals = DiagnosisSignals(
             libero_predicate=record.terminated,
             tool_error=tool_error,
             end_effector_pose=mapped.get("end_effector_pose"),
             gripper_opening=mapped.get("gripper_opening"),
+            libero_tool_evidence=libero_tool_evidence(mapped),
             transcript_text=(
-                result.get("transcript_text")
-                if isinstance(result.get("transcript_text"), str)
+                tool_result.get("transcript_text")
+                if isinstance(tool_result.get("transcript_text"), str)
                 else None
             ),
         )
@@ -435,7 +437,12 @@ class Toolkit:
                 from rpent.recovery.tool_result import classify_tool_result_failure
 
                 failure_source, error_value = classify_tool_result_failure(result_dict)
-                observer_failed = failure_source is not None
+                observer_failed = failure_source not in {None, "task_not_terminated"}
+                if failure_source == "task_not_terminated":
+                    logger.debug(
+                        "%s reported task not terminated after a normal contact skill",
+                        name,
+                    )
                 tool_error = str(error_value) if error_value is not None else None
 
             if not _is_readonly(handler):

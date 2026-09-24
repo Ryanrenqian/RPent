@@ -18,6 +18,9 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
+# Contract declared by robots/libero/tools.py in LiberoPrimitives.pi0_doubled.
+CONTACT_SKILL_SUCCESS_BY_TERMINATION = "contact_skill_success_by_termination"
+
 
 def classify_tool_result_failure(
     raw_result: Mapping[str, Any],
@@ -44,5 +47,11 @@ def classify_tool_result_failure(
     if error_value:
         return "result_error", error_value
     if raw_result.get("success") is False or action_result.get("success") is False:
+        diagnostics = action_result.get("diagnostics")
+        if (
+            isinstance(diagnostics, Mapping)
+            and diagnostics.get("mode") == CONTACT_SKILL_SUCCESS_BY_TERMINATION
+        ):
+            return "task_not_terminated", None
         return "result_success_false", None
     return None, None

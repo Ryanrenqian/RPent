@@ -19,6 +19,14 @@ from __future__ import annotations
 from typing import Any, Mapping
 
 
+def _number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _evidence(source: str, value: Any) -> dict[str, Any]:
+    return {"source": source, "value": value}
+
+
 def map_libero_evidence(result: Mapping[str, Any]) -> dict[str, Any]:
     """Extract recovery evidence from one LIBERO tool result.
 
@@ -45,18 +53,106 @@ def map_libero_evidence(result: Mapping[str, Any]) -> dict[str, Any]:
 
     state = result.get("state", action_result.get("state"))
     state_mapping = state if isinstance(state, Mapping) else {}
+    diagnostics = action_result.get("diagnostics")
+    diagnostics = diagnostics if isinstance(diagnostics, Mapping) else {}
+    tool_name = action_result.get("name")
+
+    final_dist = action_result.get("final_dist_m")
+    tolerance = diagnostics.get("tol")
+    if (
+        tool_name in {"move_to", "move_pose"}
+        and _number(final_dist)
+        and _number(tolerance)
+    ):
+        mapped["libero_position"] = _evidence(
+            f"LIBERO {tool_name} result: final_dist_m vs diagnostics.tol",
+            {
+                "reached": final_dist < tolerance,
+                "final_dist_m": final_dist,
+                "tol": tolerance,
+            },
+        )
+
+    orientation_tolerance = diagnostics.get("ori_tol")
+    final_pitch = action_result.get("final_pitch")
+    if (
+        tool_name == "move_pose"
+        and action_result.get("success") is False
+        and "libero_position" in mapped
+        and mapped["libero_position"]["value"]["reached"] is True
+        and _number(final_pitch)
+        and _number(orientation_tolerance)
+    ):
+        mapped["libero_orientation"] = _evidence(
+            "LIBERO move_pose result: success=False while final_dist_m < "
+            "diagnostics.tol; "
+            "final_pitch and diagnostics.ori_tol",
+            {
+                "reached": False,
+                "final_pitch": final_pitch,
+                "ori_tol": orientation_tolerance,
+            },
+        )
+
+    descent = diagnostics.get("descent_m")
+    descent_threshold = diagnostics.get("descent_thresh")
+    if tool_name == "pick" and _number(descent) and _number(descent_threshold):
+        mapped["libero_pick_descent"] = _evidence(
+            "LIBERO pi0_pick result: diagnostics.descent_m vs "
+            "diagnostics.descent_thresh",
+            {
+                "reached": descent >= descent_threshold,
+                "descent_m": descent,
+                "descent_thresh": descent_threshold,
+            },
+        )
+
+    opening = action_result.get("min_gripper_opening")
+    open_threshold = diagnostics.get("gripper_open_thresh")
+    closed_threshold = diagnostics.get("gripper_closed_thresh")
+    if (
+        tool_name == "pick"
+        and _number(opening)
+        and _number(open_threshold)
+        and _number(closed_threshold)
+    ):
+        mapped["libero_pick_close"] = _evidence(
+            "LIBERO pi0_pick result: min_gripper_opening vs "
+            "diagnostics.gripper_open_thresh/gripper_closed_thresh",
+            {
+                "reached": open_threshold <= opening < closed_threshold,
+                "min_gripper_opening": opening,
+                "gripper_open_thresh": open_threshold,
+                "gripper_closed_thresh": closed_threshold,
+            },
+        )
+
+    peak_lift = action_result.get("peak_lift_m")
+    lift_threshold = diagnostics.get("lift_thresh")
+    if tool_name == "pick" and _number(peak_lift) and _number(lift_threshold):
+        mapped["libero_pick_lift"] = _evidence(
+            "LIBERO pi0_pick result: peak_lift_m vs diagnostics.lift_thresh",
+            {
+                "reached": peak_lift >= lift_threshold,
+                "peak_lift_m": peak_lift,
+                "lift_thresh": lift_threshold,
+            },
+        )
 
     target = action_result.get("target_xyz")
     final = action_result.get("final_eef_pos")
     if isinstance(target, (list, tuple)) and isinstance(final, (list, tuple)):
         if len(target) == len(final):
             pose: dict[str, Any] = {
-                "reachable": action_result.get("success"),
                 "pose_error": [
                     target_value - final_value
                     for target_value, final_value in zip(target, final)
                 ],
             }
+            if tool_name in {"move_to", "move_pose"} and "libero_position" in mapped:
+                pose["reachable"] = mapped["libero_position"]["value"]["reached"]
+            elif tool_name not in {"move_to", "move_pose"}:
+                pose["reachable"] = action_result.get("success")
             current = state_mapping.get("robot0_eef_pos")
             if isinstance(current, (list, tuple)):
                 pose["current_pose"] = list(current)
@@ -71,3 +167,8 @@ def map_libero_evidence(result: Mapping[str, Any]) -> dict[str, Any]:
         mapped["gripper_opening"] = sum(abs(value) for value in gripper_qpos[:2])
 
     return mapped
+
+
+def libero_tool_evidence(mapped: Mapping[str, Any]) -> dict[str, Mapping[str, Any]]:
+    """Select tool-returned LIBERO predicate evidence from mapped observations."""
+    return {key: value for key, value in mapped.items() if key.startswith("libero_")}

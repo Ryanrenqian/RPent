@@ -30,7 +30,7 @@ from .events import (
     RecoveryDecision,
     RecoveryLevel,
 )
-from .libero_evidence import map_libero_evidence
+from .libero_evidence import libero_tool_evidence, map_libero_evidence
 from .router import FailureRouter
 from .skills import SkillPlaybook
 from .tools import ToolCall, ToolRegistry, ToolResult
@@ -357,6 +357,7 @@ class SkillRuntime:
                     signals = DiagnosisSignals(
                         libero_predicate=None,
                         tool_error=result.error,
+                        libero_tool_evidence=libero_tool_evidence(mapped_evidence),
                         end_effector_pose=metadata.get(
                             "end_effector_pose",
                             mapped_evidence.get(

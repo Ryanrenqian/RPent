@@ -45,6 +45,7 @@ class DiagnosisSignals:
     transcript_text: str | None = None
     tool_error: str | None = None
     missing_capability: str | None = None
+    libero_tool_evidence: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
     scored_reason_source: str | None = None
     _cell_record_evidence: bool = field(
         default=False,
@@ -186,8 +187,8 @@ class DiagnosisResult:
 class FailureDiagnoser:
     """Convert signals into evidence by fixed priority.
 
-    Priority is registry gap, SAM3, pose, gripper, transcript, tool error,
-    scored end reason, then Pi0.5 self-report.
+    Priority is registry gap, SAM3, LIBERO tool-result evidence, pose/gripper,
+    transcript, tool error, scored end reason, then Pi0.5 self-report.
     Self-report alone never sets a recovery-routing boolean.
     """
 
@@ -237,6 +238,12 @@ class FailureDiagnoser:
                 signals.cell_input.get("scored_reason"),
             ),
         }
+        for name, item in signals.libero_tool_evidence.items():
+            if name in evidence:
+                raise ValueError(f"LIBERO tool evidence conflicts with {name!r}")
+            if set(item) != {"source", "value"}:
+                raise ValueError("LIBERO tool evidence must contain source and value")
+            evidence[name] = dict(item)
         if signals._cell_record_evidence:
             evidence["scoreable"] = _evidence("CellRecord.scoreable", True)
         scored_reason = signals.cell_input.get("scored_reason")
@@ -263,6 +270,11 @@ class FailureDiagnoser:
             if isinstance(signals.end_effector_pose, Mapping)
             else {}
         )
+        libero_values = {
+            name: item["value"]
+            for name, item in signals.libero_tool_evidence.items()
+            if isinstance(item.get("value"), Mapping)
+        }
         family = None
         parameter = False
         world = False
@@ -274,6 +286,36 @@ class FailureDiagnoser:
             family, rule_id = "missing_capability", "registry_missing_capability"
         elif sam3.get("blocked") or sam3.get("object_displaced"):
             family, world, rule_id = "world_state_invalidated", True, "sam3_world_state"
+        elif libero_values.get("libero_position", {}).get("reached") is False:
+            family, parameter, rule_id = (
+                "parameter_or_pose",
+                True,
+                "libero_position_not_reached",
+            )
+        elif libero_values.get("libero_orientation", {}).get("reached") is False:
+            family, parameter, rule_id = (
+                "parameter_or_pose",
+                True,
+                "libero_orientation_not_reached",
+            )
+        elif libero_values.get("libero_pick_descent", {}).get("reached") is False:
+            family, parameter, rule_id = (
+                "parameter_or_pose",
+                True,
+                "libero_pick_no_descent",
+            )
+        elif libero_values.get("libero_pick_close", {}).get("reached") is False:
+            family, parameter, rule_id = (
+                "grasp_contact",
+                True,
+                "libero_pick_no_close",
+            )
+        elif libero_values.get("libero_pick_lift", {}).get("reached") is False:
+            family, parameter, rule_id = (
+                "grasp_contact",
+                True,
+                "libero_pick_no_lift",
+            )
         elif (
             pose.get("reachable") is False
             or "wrong pose" in text

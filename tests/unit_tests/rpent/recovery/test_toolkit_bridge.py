@@ -105,6 +105,15 @@ class _ChangingFailureToolkit(Toolkit):
             self._reported_success,
         )
         self.add_tool(
+            "contact_incomplete",
+            {
+                "name": "contact_incomplete",
+                "description": "Return an incomplete LIBERO contact skill",
+                "input_schema": {"type": "object"},
+            },
+            self._contact_incomplete,
+        )
+        self.add_tool(
             "falsy_error",
             {
                 "name": "falsy_error",
@@ -136,6 +145,15 @@ class _ChangingFailureToolkit(Toolkit):
     @readonly
     def _reported_success() -> dict[str, Any]:
         return {"success": True}
+
+    @staticmethod
+    @readonly
+    def _contact_incomplete() -> dict[str, Any]:
+        return {
+            "name": "pi0_doubled",
+            "success": False,
+            "diagnostics": {"mode": "contact_skill_success_by_termination"},
+        }
 
     @staticmethod
     @readonly
@@ -304,6 +322,9 @@ def test_bridge_honors_explicit_success_without_reclassifying_other_results(
     reported_failure = registry.invoke(ToolCall("reported_failure"))
     assert reported_failure.success is False
     assert reported_failure.error == "tool result reported success=False"
+    contact_incomplete = registry.invoke(ToolCall("contact_incomplete"))
+    assert contact_incomplete.success is False
+    assert contact_incomplete.error == "tool result reported success=False"
 
     reported_success = registry.invoke(ToolCall("reported_success"))
     assert reported_success.success is True

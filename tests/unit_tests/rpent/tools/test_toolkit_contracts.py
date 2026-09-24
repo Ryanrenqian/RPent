@@ -669,6 +669,52 @@ def test_successful_tool_result_is_not_observed(
     assert (output_dir / "recovery_events.jsonl").read_text() == ""
 
 
+@pytest.mark.parametrize("recovery_goal", [None, "task-t0-s0"])
+@pytest.mark.parametrize(
+    ("case", "expected"),
+    [
+        ("success", {"observation": 1}),
+        ("failure", {"observation": 1}),
+        (
+            "exception",
+            {"observation": 1, "error": "boom", "traceback": "fixed traceback"},
+        ),
+        ("grasp_failure", {"observation": 1}),
+    ],
+)
+def test_execute_tool_result_is_unchanged_by_recovery_observer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    recovery_goal: str | None,
+    case: str,
+    expected: dict[str, Any],
+) -> None:
+    output_dir = tmp_path / ("observer-on" if recovery_goal else "observer-off") / case
+    monkeypatch.setattr("rpent.tools.toolkit.get_output_dir", lambda: output_dir)
+    monkeypatch.setattr(
+        "rpent.tools.toolkit.traceback.format_exc", lambda: "fixed traceback"
+    )
+    toolkit = _ContractToolkit(output_dir, recovery_goal=recovery_goal)
+
+    def handle() -> dict[str, Any]:
+        if case == "success":
+            return {"success": True, "detail": "done"}
+        if case == "failure":
+            return {"error": "reported", "detail": "failed"}
+        if case == "grasp_failure":
+            return {"success": False, "detail": "grasp missed"}
+        raise RuntimeError("boom")
+
+    toolkit.add_tool("act", {"name": "act"}, handle)
+    returned = toolkit.execute_tool("act", {})
+    toolkit.close()
+
+    assert returned.name == "act"
+    assert returned.call_id is None
+    assert returned.is_finish is False
+    assert returned.result == expected
+
+
 @pytest.mark.parametrize(
     "handler_result",
     [
